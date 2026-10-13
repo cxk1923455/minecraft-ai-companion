@@ -309,7 +309,7 @@ console.log('\n--- 工具面（share 移除 / present 接入）---')
   console.log(`  ${/行事准则已替换为新版本默认内容/.test(idx) ? '✅' : '❌'} 真替换时会写一行日志（便于排查"我的准则怎么变了"）`)
   console.log(`  ${!/read_image \{file_path/.test(codeOnly) && !/present \{files/.test(codeOnly) ? '✅' : '❌'} 🔴 旧的"用 read_image / present 发图"提示已清干净（注释里的历史说明不算）`)
   const vp = readFileSync(new URL('./src/version-prompt.mjs', import.meta.url), 'utf8')
-  console.log(`  ${/mc_move/.test(vp) && /本版本对于生存、冒险能力的支持极弱/.test(vp) ? '✅' : '❌'} 版本提示写本版本的时效性事实（工具成熟度 + 能力短板；不再写交付流程——那归 mc_kit_express 工具说明）`)
+  console.log(`  ${/mc_follow/.test(vp) && /mc_pathfind/.test(vp) && /服务器指令默认禁止/.test(vp) ? '✅' : '❌'} 版本提示与新增生存技能、默认指令权限一致`)
   const cli = readFileSync(new URL('./client.js', import.meta.url), 'utf8')
   console.log(`  ${/data-wc-verprompt/.test(cli) && /本版本内置提示/.test(cli) ? '✅' : '❌'} 「提示词」页只读展示版本内置提示（用户有权知道它说了什么）`)
 }
@@ -1729,7 +1729,9 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
   const { join } = await import('node:path')
   const cfg = new PluginConfig(mkdtempSync(join(tmpdir(), 'whale-cfg-')))
 
-  console.log(`  ${cfg.commandAllowed('tp') && !cfg.commandAllowed('op') ? '✅' : '❌'} 默认白名单：放行 tp、拒绝 op`)
+  console.log(`  ${!cfg.commandAllowed('tp') && !cfg.commandAllowed('op') ? '✅' : '❌'} 默认总权限关闭，白名单不能自行开启指令`)
+  cfg.set('commandsEnabled', true)
+  console.log(`  ${cfg.commandAllowed('tp') && !cfg.commandAllowed('op') ? '✅' : '❌'} 显式开启总权限后才按白名单放行`)
   cfg.set('commandWhitelist', ['give', '/^ti/'])
   console.log(`  ${cfg.commandAllowed('time') && cfg.commandAllowed('give') && !cfg.commandAllowed('tp') ? '✅' : '❌'} 改白名单立即生效（正则 /^ti/ 命中 time，tp 被拒）`)
   cfg.set('commandWhitelist', ['*'])
@@ -1741,7 +1743,7 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
   cfg.unset('commandWhitelist')
   console.log(`  ${cfg.commandAllowed('tp') ? '✅' : '❌'} unset 回到默认值`)
   cfg.reset()
-  console.log(`  ${cfg.commandAllowed('tp') && cfg.get('mcMode.hideAdminTools') === true ? '✅' : '❌'} reset 全部恢复默认`)
+  console.log(`  ${!cfg.commandAllowed('tp') && cfg.get('commandsEnabled') === false && cfg.get('mcMode.hideAdminTools') === true ? '✅' : '❌'} reset 恢复默认并关闭指令总权限`)
   console.log(`  ${cfg.isMcModePreset('minecraft') && cfg.isMcModePreset('minecraft-plus') && !cfg.isMcModePreset('standard') ? '✅' : '❌'} MC 模式判定用可配置的 preset 名单（含 MC+）`)
   console.log(`  ${cfg.isMcPlusPreset('minecraft-plus') && !cfg.isMcPlusPreset('minecraft') && !cfg.isMcPlusPreset('standard') ? '✅' : '❌'} 🔴 MC+ 变体判定：minecraft-plus 是、minecraft/standard 不是`)
   const badPlus = await Promise.resolve().then(() => cfg.set('mcPlusPresets', 'minecraft-plus')).catch((e) => e.message)
@@ -1820,7 +1822,7 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
     console.log(`  ${bad.length === 0 ? '✅' : '❌'} 🔴🔴 每个 waterfall 监听器都接 next 且调用它（不交棒＝否决整条链 ⇒ 宿主 decision.kind 崩）${bad.length ? '：违规 ' + bad.map((b) => b.name).join(', ') : `（${wf.map((r) => r.name).join(', ') || '无'}）`}`)
     console.log(`  ${/if \(typeof next !== 'function'\)/.test(idx) && /const inner = next\(\)/.test(idx) ? '✅' : '❌'} pre-step 监听器：交棒拿回内层结果、原样返回（不改载荷），且对 next 缺失有兜底`)
     console.log(`  ${/return inner\.then\(\(decision\) => enterWithNotices/.test(idx) && /const inner = next\(\)/.test(idx) ? '✅' : '❌'} 🔴 交棒拿回 decision 后**当场改写本步消息**（enterWithNotices）—— 提示行与用户那句同批送出，不再晚一步`)
-    console.log(`  ${/decision\.kind !== 'enter'/.test(idx) && /messages: \[\.\.\.noticeMessagesFor\(r\.todo\), \.\.\.msgs\]/.test(idx) ? '✅' : '❌'} 只对 enter 生效，且提示行排在本步消息**最前面**`)
+    console.log(`  ${/decision\.kind !== 'enter'/.test(idx) && /messages: \[\.\.\.noticeMessagesFor\(r\.todo\), \.\.\.msgs(?:,|\])/.test(idx) ? '✅' : '❌'} 只对 enter 生效，且提示行排在本步消息**最前面**`)
     console.log(`  ${/todo: \[\]/.test(idx) ? '✅' : '❌'} 🔴 对账的每个提前返回都带 todo 字段（漏一个就是被 catch 吞掉的静默 TypeError）`)
     console.log(`  ${/since = Array\.isArray\(ev\) \? ev\.length : 0/.test(idx) && /events\.slice\(from\)/.test(idx) ? '✅' : '❌'} 🔴 切出模式时给日志划一条线（切出再切回能重投，不被旧记录误判）`)
     console.log(`  ${!/if \(removed > 0\) \{\s*const l = ledgerOf/.test(idx) ? '✅' : '❌'} 🔴 切出模式时**无条件**清台账（提示行已在本步送出、队列常为空，按"队列非空"判断会漏清 ⇒ 再也不投）`)
@@ -1841,6 +1843,7 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
   const adminSet = await tools.get('mc_admin_config').execute(
     { action: 'set', path: 'commandWhitelist', value: ['op', 'tp'] }, A)
   console.log(`  ${Array.isArray(adminSet.value) && adminSet.value.includes('op') ? '✅' : '❌'} mc_admin_config{set} 改白名单成功`)
+  await tools.get('mc_admin_config').execute({ action: 'set', path: 'commandsEnabled', value: true }, A)
 
   // ③ 白名单立刻作用到 mc_command（改完不用重启）
   const wlErr = await tools.get('mc_command').execute({ command: '/give @s stone' }, A).catch((e) => e.message)
@@ -1926,7 +1929,7 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
     const plusCtxObj = {}; presetByCtx.set(plusCtxObj, 'minecraft-plus')
     const plusAgent = { id: 'sess-MCP', ctx: plusCtxObj }
     const plusAdmin = callGuard({ name: 'mc_admin_config', agent: plusAgent })
-    console.log(`  ${plusAdmin === undefined ? '✅' : '❌'} 🔴 MC+ 模式**放行** mc_admin_config（用户定：MC+ 可见管理工具）`)
+    console.log(`  ${typeof plusAdmin === 'string' ? '✅' : '❌'} MC+ 游戏会话同样不能自行开启全局权限`)
     const plusOutside = callGuard({ name: 'read', arguments: { path: 'E:\\x\\README.md' }, agent: plusAgent })
     console.log(`  ${plusOutside === undefined ? '✅' : '❌'} 🔴 MC+ 的文件工具**不受 .whale-craft/ 限制**（全工作区）`)
     const plusCred = callGuard({ name: 'read', arguments: { path: 'C:\\Users\\x\\.dsh\\.credentials.yaml' }, agent: plusAgent })
@@ -2067,6 +2070,25 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
   fire('agent/created', plainAgent)
   fire('agent/created', plusAgent)
 
+  // A rule update must neither consume a game-chat notice nor reset unrelated rule receipts.
+  {
+    const {readFileSync,writeFileSync} = await import('node:fs')
+    const auditAgent = { id:'sess-NOTICE-AUDIT',session:mkSession('whale-notice-audit-'),ctx:makeAgentCtx('minecraft'),inbox:mkInbox() }
+    fire('agent/created', auditAgent)
+    await preStepMessages(auditAgent,1,1)
+    const rulesFile = join(process.env.WHALE_CRAFT_MEMORY_DIR,'RULES.md')
+    const originalRules = readFileSync(rulesFile,'utf8')
+    const chatNotice = {id:'game-chat-audit',role:'user',source:{kind:'plugin:whale_craft',form:'notice',summary:'MC 看门狗：nearbySpeech'},content:[{type:'text',text:'【MC 看门狗】<Tester> 过来'}]}
+    try {
+      writeFileSync(rulesFile,originalRules+'\n规则更新回归标记\n','utf8')
+      auditAgent.inbox.append('next-step',chatNotice)
+      const changed = await preStepMessages(auditAgent,2,1)
+      console.log(`  ${changed.some(message=>message.id===chatNotice.id) ? '✅' : '❌'} 更新规则时保留真实玩家聊天提醒`)
+      const next = await preStepMessages(auditAgent,2,2)
+      console.log(`  ${next.every(message=>!(message.content??[]).some(part=>/^Instructions from:/m.test(part.text??''))) ? '✅' : '❌'} 更新一条规则后，未变化的规则和版本提示不再反复注入`)
+    } finally { writeFileSync(rulesFile,originalRules,'utf8') }
+  }
+
   const mcRestrict = restrictCalls.find((c) => c.preset === 'minecraft')
   // 🔴 2026-09-16 真机事故的正解：把提示词当**插件提示**投递（宿主自己注入 AGENTS.md 也走 `inbox.nextStep`）
   //    —— 必达（不过 systemPrompt 组装，persona 的 complete/includeRuntimeContext 压不到）
@@ -2093,9 +2115,9 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
     // 第 2 条 = **版本硬提示词**（硬编码、随版本发布、无开关、排在行事准则之后）
     const bodyV = (second?.content ?? []).map((c) => c.text ?? '').join('')
     console.log(`  ${second?.source?.form === 'notice' && /^Instructions from: whale_craft@/.test(bodyV.split('\n')[0] ?? '') ? '✅' : '❌'} 第 2 条 = 版本提示（来源行 ${JSON.stringify((bodyV.split('\n')[0] ?? '').slice(0, 46))}…）`)
-    console.log(`  ${/mc_move/.test(bodyV) && /mc_command/.test(bodyV) && /\/setblock/.test(bodyV) ? '✅' : '❌'} 版本提示正文点了工具名与指令名（mc_move / mc_command / /setblock）`)
-    console.log(`  ${/可以先试一次/.test(bodyV) && /被白名单或权限拒绝/.test(bodyV) ? '✅' : '❌'} 第 1 条保留"先试一次、被拒再退"（不然模型有权限也不敢用指令）`)
-    console.log(`  ${/生存、冒险/.test(bodyV) && /明确告知用户/.test(bodyV) ? '✅' : '❌'} 第 2 条讲清本版本能力短板（生存/冒险极弱，先告知用户再尽力）`)
+    console.log(`  ${/mc_follow/.test(bodyV) && /mc_pathfind/.test(bodyV) && /mc_goal/.test(bodyV) ? '✅' : '❌'} 版本提示要求行动请求落实到生存工具`)
+    console.log(`  ${/服务器指令默认禁止/.test(bodyV) && /不自行打开权限/.test(bodyV) && !/可以先试一次/.test(bodyV) ? '✅' : '❌'} 版本提示遵守用户权限，删除先试指令的旧建议`)
+    console.log(`  ${/生存、冒险/.test(bodyV) && /明确告知用户/.test(bodyV) && /真实世界状态/.test(bodyV) ? '✅' : '❌'} 能力边界与完成验证写入本轮提示`)
     console.log(`  ${!/mc_kit_express/.test(bodyV) && !/\.whale-craft\/\.express\//.test(bodyV) ? '✅' : '❌'} 🔴 交付/文件分享流程已移出版本提示（归 mc_kit_express 工具说明）`)
     console.log(`  ${/^1\./m.test(bodyV) && /^2\./m.test(bodyV) && !/^3\./m.test(bodyV) ? '✅' : '❌'} 正文就是两条（用户："别的属实多余了"）`)
     // 选项 A（用户 2026-09-16 定）：**正文里不写版本号** —— 版本由来源行与折叠标题携带
@@ -2151,7 +2173,7 @@ console.log('\n--- 全局配置 / mc_admin_config / MC 模式隔离 ---')
     const plusAllow = plusCalls.some((c) => Array.isArray(c.f?.allow))
     const plusDeny = plusCalls.find((c) => Array.isArray(c.f?.deny))?.f?.deny ?? []
     console.log(`  ${!plusAllow ? '✅' : '❌'} 🔴 MC+ 模式**不套白名单**（标准工具全量 + mc/mckit 全量可见）`)
-    console.log(`  ${plusDeny.length > 0 && plusDeny.every((n) => n.startsWith('mc_debug_')) ? '✅' : '❌'} 🔴 MC+ 只在「调试开关关」时 deny 调试工具（${plusDeny.join(', ') || '无'}）`)
+    console.log(`  ${plusDeny.includes('mc_admin_config') && plusDeny.every((n) => n.startsWith('mc_debug_') || n.startsWith('mc_admin_')) ? '✅' : '❌'} MC+ 隐藏权限管理工具和未开启的调试工具（${plusDeny.join(', ') || '无'}）`)
   }
   // 🔴 2026-09-18 去重（新挂载点）：同一个 MC 会话**每一轮**都会走到 pre-step，
   //    但提示词只该进一次 —— 幂等靠"按 preset 记账 + 会话日志回读"。
@@ -2782,6 +2804,7 @@ console.log('\n--- 行事准则 RULES.md / 新开关 / 边界信息 ---')
 
   // 开关：允许所有指令
   await tools.get('mc_admin_config').execute({ action: 'set', path: 'allowAllCommands', value: true }, A)
+  await tools.get('mc_admin_config').execute({ action: 'set', path: 'commandsEnabled', value: true }, A)
   const anyCmd = await tools.get('mc_command').execute({ command: '/definitely-not-whitelisted' }, A).catch((e) => e.message)
   console.log(`  ${/不在线/.test(String(anyCmd)) ? '✅' : '❌'} 「允许所有指令」打开后任意指令都过白名单（只因未连服报不在线）`)
   const badBool = await tools.get('mc_admin_config').execute({ action: 'set', path: 'allowAllCommands', value: 'yes' }, A).catch((e) => e.message)

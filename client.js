@@ -1499,7 +1499,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
     /* ---------------------------------------------------------- 页 2：指令白名单 */
 
     function WhitelistPane(props) {
-      const { wlText, allowAll, busyKey, onWlText, onAllowAll, onSave } = props
+      const { wlText, allowAll, commandsEnabled, busyKey, onWlText, onAllowAll, onCommandsEnabled, onSave } = props
       const busy = busyKey !== null
       const saveBusy = busyKey === 'wl:save'
       // 开关**一拨就存**（用户 2026-09-16 定）；下面那份白名单仍然要点「保存」
@@ -1510,13 +1510,20 @@ select[data-wc-in]{appearance:none;padding-right:22px;
         { 'data-wc-pane-page': 'whitelist' },
         React.createElement('div', { 'data-wc-sec': '' },
           React.createElement(Switch, {
-            label: '允许所有指令',
+            label: '允许 AI 使用服务器指令',
+            disabled: busy,
+            on: commandsEnabled === true,
+            onToggle: onCommandsEnabled,
+          }),
+          commandsEnabled !== true ? React.createElement('div', { 'data-wc-hint': '' }, '指令已全部禁用；AI 使用走路、跟随、采集和建造工具。下面的白名单不会自行开启权限。') : null,
+          React.createElement(Switch, {
+            label: '允许白名单之外的指令',
             disabled: allowBusy,
             on: allowAll === true,
             onToggle: (next) => onAllowAll(next),
           }),
           React.createElement('div', { 'data-wc-h': '' }, '指令白名单（一行一条）'),
-          allowAll
+          commandsEnabled && allowAll
             ? React.createElement('div', { 'data-wc-warnnote': '' }, '已允许所有指令，白名单不再生效。')
             : null,
           React.createElement('textarea', {
@@ -2048,6 +2055,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
       const [defaultAccount, setDefaultAccount] = React.useState(null)
       const [wlText, setWlText] = React.useState('')
       const [allowAll, setAllowAll] = React.useState(false)
+      const [commandsEnabled, setCommandsEnabled] = React.useState(false)
       const [mdText, setMdText] = React.useState('')
       const [mdSource, setMdSource] = React.useState('default')
       const [mdPath, setMdPath] = React.useState('')
@@ -2114,6 +2122,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
             setWorkspaceName(String(c.workspaceName ?? ''))
             setWlText(whitelistToText(c.commandWhitelist))
             setAllowAll(c.allowAllCommands === true)
+            setCommandsEnabled(c.commandsEnabled === true)
             setInjectWc(c.injectWhaleCraftAgentsMd !== false)
             setInjectWs(c.injectWorkspaceAgentsMd === true)
             setShareOn(c.expressEnabled === true)
@@ -2224,6 +2233,14 @@ select[data-wc-in]{appearance:none;padding-right:22px;
       /* ── 页 2：白名单 ──
        * 「允许所有指令」开关**一拨就存**（用户 2026-09-16 定），失败把开关拨回去；
        * 白名单文本仍由「保存」提交（只发 commandWhitelist）。 */
+      const toggleCommandsEnabled = React.useCallback((next) => {
+        const previous = commandsEnabled === true
+        const value = next === true
+        setCommandsEnabled(value)
+        return run('cfg:commandsEnabled', () => apiPatch(withSid('/api/mc/config'), { commandsEnabled: value }), value ? '已允许服务器指令；仍受白名单限制' : '服务器指令已全部禁用')
+          .then(ok => { if (!ok) setCommandsEnabled(previous); return ok })
+      }, [run, commandsEnabled])
+
       const toggleAllowAll = React.useCallback((next) => {
         const prev = allowAll === true
         const want = next === true
@@ -2326,7 +2343,8 @@ select[data-wc-in]{appearance:none;padding-right:22px;
 
       const pane = tab === 'whitelist'
         ? React.createElement(WhitelistPane, {
-          wlText, allowAll, busyKey,
+          wlText, allowAll, commandsEnabled, busyKey,
+          onCommandsEnabled: toggleCommandsEnabled,
           onWlText: setWlText, onAllowAll: toggleAllowAll, onSave: saveWhitelist,
         })
         : (tab === 'prompt'

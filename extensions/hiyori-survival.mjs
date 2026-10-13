@@ -6,7 +6,7 @@ export function apply({ ctx, asTool, getSession, logLine }) {
     name, description, parameters, output, timeoutMs,
     execute: (args, exec) => execute(getSession(exec).bot.skills, args, exec?.signal),
   }))
-  register('mc_survival', '生存技能状态与设置：本地自动进食、缺氧上浮；只用当前会话的机器人，不调用第二个 AI。省略参数只查看。设置按会话保留至会话结束。', {
+  register('mc_survival', '查询真实位置、follow.distance、verifiedNearby、当前动作、后台目标和本地决策耗时；确认在玩家身边前必须检查实际距离。可设置自动进食、上浮、自卫和撤退。只用当前会话的机器人，省略参数只查询。', {
     autoEat: { type: 'boolean' }, autoSurface: { type: 'boolean' }, autoRetreat: { type: 'boolean' }, autoDefend: { type: 'boolean' }, foodThreshold: { type: 'integer' }, oxygenThreshold: { type: 'integer' }, healthThreshold: { type: 'integer' }, followDistance: { type: 'integer' },
   }, (skills, args) => Object.keys(args).length ? skills.configure(args) : skills.status())
   register('mc_halt', '立即停止当前 Minecraft 动作与持续跟随，保持游戏连接；暂停自动生存动作。随后调用新动作或 mc_survival 设置可恢复。', {}, skills => skills.halt(), 10000)

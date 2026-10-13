@@ -236,8 +236,8 @@ function planningRank(state) {
   return [
     Object.keys(state.missing).length,
     Object.values(state.missing).reduce((sum, count) => sum + count, 0),
-    -state.initialStockUsed,
     state.operationCount,
+    state.initialStockUsed,
     state.preferenceCost,
     state.requiresCraftingTable ? 1 : 0
   ];

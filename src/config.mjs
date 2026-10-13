@@ -52,6 +52,8 @@ export function resolveStateDir ({ env = process.env, dshHomePath, whaleDir, hom
 
 /** 默认值 = 老行为（现有 mc_command 的白名单原样搬过来） */
 export const DEFAULT_CONFIG = {
+  /** Master must explicitly enable commands; whitelist alone never enables them. */
+  commandsEnabled: false,
   /**
    * mc_command 允许的服务器指令名。支持三种写法：
    * 精确名（`"tp"`）· 正则（斜杠包裹，如 `^gi.+`）· `"*"` = 全部放行
@@ -605,6 +607,7 @@ export class PluginConfig {
    * 输入可以是 `/tp x y z` 或 `tp`；只按**指令名**判定。
    */
   commandAllowed (command) {
+    if (this.get('commandsEnabled') !== true) return false
     // 「MC设置 → 指令白名单」页的开关：允许所有指令
     if (this.get('allowAllCommands') === true) return true
     const wl = this.get('commandWhitelist')
@@ -649,7 +652,7 @@ function validate (top, rest, value) {
     if (value !== null && typeof value !== 'string') throw new Error('memoryDir 必须是字符串（绝对路径）或 null')
     return
   }
-  if (top === 'allowAllCommands' || top === 'ensureMcPreset' || top === 'expressEnabled' || top === 'exposeDebugTools') {
+  if (top === 'commandsEnabled' || top === 'allowAllCommands' || top === 'ensureMcPreset' || top === 'expressEnabled' || top === 'exposeDebugTools') {
     if (typeof value !== 'boolean') throw new Error(`${top} 必须是 true/false`)
     return
   }

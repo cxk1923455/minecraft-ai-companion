@@ -441,3 +441,43 @@ test('a dimension change clears old navigation and cancels the current goal', as
   assert.equal(skills.goals.view().state, 'cancelled')
   assert.equal(raw.pathfinder.goal, null)
 })
+
+test('smelting uses matching materials across multiple inventory stacks', async () => {
+  const {raw,skills} = fixture()
+  let received = 0, ready = false
+  raw.inventory.items = () => [
+    {name:'raw_iron',type:registry.itemsByName.raw_iron.id,metadata:0,count:2},
+    {name:'raw_iron',type:registry.itemsByName.raw_iron.id,metadata:0,count:2},
+    {name:'coal',type:registry.itemsByName.coal.id,metadata:0,count:1},
+    ...(received ? [{name:'iron_ingot',type:registry.itemsByName.iron_ingot.id,count:received}] : []),
+  ]
+  raw.findBlock = () => ({name:'furnace',position:new Vec3(1,64,0)})
+  raw.openFurnace = async () => ({inputItem:()=>null,fuelItem:()=>null,outputItem:()=>ready?{name:'iron_ingot',count:4}:null,
+    putFuel:async()=>{},putInput:async(_type,_meta,count)=>{assert.equal(count,4);ready=true},
+    takeOutput:async()=>{received=4},close(){}})
+  const result = await skills.smelt({item:'iron_ingot',count:4})
+  assert.equal(result.smelted,4)
+})
+
+test('blueprint materials exceeding one tool batch are prepared through real recipe plans', async () => {
+  const {raw,skills} = fixture({oak_log:64})
+  raw.recipesFor = (id,_meta,count,table) => require('prismarine-recipe')(registry).Recipe.find(id,null).filter(recipe=>Object.keys(recipe).length && (!recipe.requiresTable||table))
+  raw.craft = async recipe => {
+    for (const delta of recipe.delta) {
+      const name=registry.items[delta.id]?.name
+      if (name) raw.stock[name]=(raw.stock[name]??0)+delta.count
+    }
+  }
+  const job={controller:new AbortController(),state:'running',progress:{steps:0},phase:'materials'}
+  await skills.goals.ensure(job,'oak_planks',256)
+  assert.equal(raw.stock.oak_planks,256)
+  assert.equal(raw.stock.oak_log,0)
+})
+
+test('recipe planning avoids consuming extra logs through an unnecessary wood conversion', async () => {
+  const {skills} = fixture({oak_log:64,oak_planks:64})
+  const plan = await skills.craftPlan({item:'oak_planks',count:64})
+  assert.equal(plan.canCraftNow,true)
+  assert.equal(plan.totalRequired.oak_log,16)
+  assert.equal(plan.steps.some(step=>step.item==='oak_wood'),false)
+})

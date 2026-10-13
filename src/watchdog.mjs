@@ -52,10 +52,13 @@
  */
 
 import { userMessage } from './user-message.mjs'
+import { localChatIntent } from './chat-intents.mjs'
 
 /** 默认配置。括号里是"为什么默认这样"。 */
 export const WATCH_DEFAULTS = {  /** 进服自动挂载（用户要求：进游戏自动打开） */
   autoArm: true,
+  /** Nearby/addressed movement requests execute without waiting for model inference. */
+  localChatControl: true,
   /** 退服时是否提醒 AI（用户要求：退出游戏会提醒 AI） */
   notifyOnDisarm: true,
 
@@ -183,6 +186,7 @@ export class Watchdog {
 
     /** 绑定的监听器（disarm 时摘掉） */
     this._listeners = []
+    this.localAction = null
 
     /**
      * **模式闸门**：只有"仍然是 MC 模式"的会话才允许注入（2026-09-17 补）。
@@ -330,6 +334,8 @@ export class Watchdog {
     this.armed = false
     if (this.tickTimer) { clearInterval(this.tickTimer); this.tickTimer = null }
     this.#unbind()
+    this.localAction?.controller.abort('看门狗已停止')
+    this.localAction = null
     this.pending = []
     this.pendingSince = 0
     this.startedAt = 0
@@ -435,9 +441,11 @@ export class Watchdog {
       if (called.length && this.config.wakeOn.mention) why.push('mention')
       if (near && this.config.wakeOn.nearbySpeech) why.push('nearbySpeech')
       if (!why.length && topical) why.push('mention')          // 延续话题
+      const local = why.length && (near || called.length || this.sess?.bot?.skills?.follow?.toLowerCase() === String(who).toLowerCase())
+        ? this.#localChatAction(who, text) : null
       this.#fire(why, {
         kind: 'chat',
-        text: `<${who}> ${text}`,
+        text: `<${who}> ${text}${local ? `\n本地动作：${local}。请按实际状态回答，勿重复启动相同动作，勿把开始执行说成已到达。` : ''}`,
         who,
         calledBy: called,
         near,
@@ -480,6 +488,37 @@ export class Watchdog {
     this._listeners = []
   }
 
+  #localChatAction(who, text) {
+    const skills = this.sess?.bot?.skills
+    if (!this.config.localChatControl || !skills || !this.sess.bot.online) return null
+    try { if (this.gate && this.gate() === false) return null } catch { return null }
+    const intent = localChatIntent(text, this.config.mentionPatterns)
+    if (!intent || !/^[A-Za-z0-9_]{1,16}$/.test(String(who))) return null
+    if (intent !== 'halt' && !Object.keys(skills.raw?.players ?? {}).some(name => name.toLowerCase() === who.toLowerCase())) return null
+    if (intent === 'follow' && skills.follow?.toLowerCase() === who.toLowerCase() && !skills.paused) return '持续跟随已开启，距离以 mc_survival 为准'
+    this.localAction?.controller.abort('玩家的新动作请求')
+    skills.halt(`玩家 ${who} 请求 ${intent}`)
+    if (intent === 'halt') { this.localAction = null; return '已停止身体动作与跟随，保留服务器连接' }
+    const operation = { controller: new AbortController(), who, intent }
+    this.localAction = operation
+    void (async () => {
+      const until = Date.now() + 1500
+      while (skills.busy && Date.now() < until) {
+        operation.controller.signal.throwIfAborted()
+        await new Promise(resolve => setTimeout(resolve, 25))
+      }
+      operation.controller.signal.throwIfAborted()
+      if (this.gate && this.gate() === false) throw new Error('会话已退出 MC 模式')
+      const result = intent === 'follow'
+        ? skills.setFollow(who)
+        : await skills.navigate({ who, range: skills.settings.followDistance }, operation.controller.signal)
+      if (this.localAction === operation && this.armed) this.#fire(['localAction'], { kind: 'action', text: `本地 ${intent} 结果：${JSON.stringify(result)}。started 只代表启动，partial/blocked 不能报成功。` })
+    })().catch(error => {
+      if (this.localAction === operation && this.armed && !operation.controller.signal.aborted) this.#fire(['localAction'], { kind: 'action', text: `本地 ${intent} 未完成：${error.message}。请如实说明，不能声称已在玩家身边。` })
+    }).finally(() => { if (this.localAction === operation) this.localAction = null })
+    return intent === 'follow' ? '正在启动持续跟随' : '正在寻路靠近发话玩家'
+  }
+
   /* ─────────────── 事件处理 ─────────────── */
 
   /**
@@ -495,6 +534,7 @@ export class Watchdog {
 
     if (!reasons.length) return
     this.pending.push({ reasons, ...detail, at: Date.now() })
+    if (this.pending.length > 64) this.pending.splice(0, this.pending.length - 64)
     if (!this.pendingSince) this.pendingSince = Date.now()
   }
 
@@ -510,7 +550,7 @@ export class Watchdog {
     // 观察窗口到期 → 结算成一次唤醒
     if (this.pending.length && this.pendingSince && (now - this.pendingSince) >= this.config.observeWindowMs) {
       this.#flush('事件命中')
-      this.pendingSince = 0
+      if (!this.pending.length) this.pendingSince = 0
     }
 
     // 心跳（⚠️ 只在**真在线**时发：断了还喊"我还在游戏里"就是撒谎，2026-09-19 顺手堵掉）
@@ -526,7 +566,7 @@ export class Watchdog {
     }
 
     // 唤醒后等不到下文的补提醒
-    if (this.config.followUpAfterSec > 0 && this.lastWakeAt > 0) {
+    if (this.config.followUpAfterSec > 0 && this.lastWakeAt > 0 && !this.pending.length) {
       const since = now - this.lastWakeAt
       const due = this.config.followUpAfterSec * 1000
       if (since >= due && !this._followedUp) {
@@ -545,13 +585,13 @@ export class Watchdog {
     // 限流
     this.wakeTimes = this.wakeTimes.filter((t) => now - t < 60_000)
     if (this.wakeTimes.length >= this.config.maxWakePerMinute) {
-      this.stats.dropped += this.pending.length
-      this.pending = []
-      this.#record('lifecycle', `唤醒被限流丢弃（每分钟上限 ${this.config.maxWakePerMinute}）`)
+      if (!this._rateLimited) this.#record('lifecycle', `唤醒达到每分钟 ${this.config.maxWakePerMinute} 次，保留待处理事件，稍后合并通知`)
+      this._rateLimited = true
       return
     }
 
     const items = this.pending
+    this._rateLimited = false
     this.pending = []
     const allReasons = [...new Set(items.flatMap((i) => i.reasons))]
     const lines = items.map((i) => {
@@ -633,8 +673,12 @@ export class Watchdog {
             summary: `MC 看门狗：${kind}`.slice(0, 120),
           },
         })
-        agent.steer(message)
+        const delivery = agent.steer(message)
         this.stats.injected++
+        if (delivery?.then) delivery.catch(error => {
+          this.stats.injected--
+          this.#record('lifecycle', `steer 异步投递失败：${error?.message ?? error}`)
+        })
         this.#record('lifecycle', `已注入 steer（${running ? '运行中→下一步插话' : '空闲→起一轮'}｜${kind}）`)
         return
       } catch (e) {

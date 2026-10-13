@@ -9,11 +9,11 @@
 - 自动进食、上浮、PvE 自卫和低血量撤退。
 - Worker 配方规划、动作互斥和本地决策耗时统计。
 
-从 [Releases](https://github.com/cxk1923455/minecraft-ai-companion/releases) 下载 ZIP，解压到固定目录，运行 `npm install --omit=dev --no-audit --no-fund`，在 DSH 添加 `link:插件目录绝对路径`。详细安装、工具示例与边界见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。保留插件包名 `whale_craft`，方便替换已安装原版。
+从 [Releases](https://github.com/cxk1923455/minecraft-ai-companion/releases) 下载 ZIP，解压到固定目录，运行 `npm install --omit=dev --no-audit --no-fund`，在 DSH 添加 `link:插件目录绝对路径`。详细安装、工具示例与边界见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。本轮修复与验证见 [AUDIT-REPORT.md](AUDIT-REPORT.md)。保留插件包名 `whale_craft`，方便替换已安装原版。
 
 开发环境需要 Node.js 22 或更新版本。安装开发依赖后运行 `npm run check`；修改 Hiyori TypeScript 源码后运行 `npm run build:hiyori`。
 
-验证：原插件自检、36 项新增测试与独立干净安装检查已通过。真实服务器仍需实测；本地决策耗时不包含模型推理和网络往返，不代表端到端零延迟。
+验证：原插件自检、55 项新增测试与独立干净安装检查已通过。真实服务器仍需实测；本地决策耗时不包含模型推理和网络往返，不代表端到端零延迟。
 
 原项目和 Hiyori 的 MIT 许可证及署名保留在 [LICENSE](LICENSE)、[licenses/Hiyori-MIT.txt](licenses/Hiyori-MIT.txt) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -24,7 +24,7 @@
 # Whale Craft / 鲸鱼工艺
 
 > 本目录是基于用户提供的 `0.2.0-beta.2` 制作的本地 Hiyori 增强版
-> `0.2.0-beta.2.hiyori.3`。新增生存寻路、平稳跟随、采集、合成、熔炼、后台目标和本地 PvE 生存反应。
+> `0.2.0-beta.2.hiyori.4`。新增生存寻路、平稳跟随、采集、合成、熔炼、后台目标和本地 PvE 生存反应。
 > 安装与新增工具说明见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。下文保留原版说明。
 
 **[English ↓](#english)** · 中文 · [![CI](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml/badge.svg)](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml)

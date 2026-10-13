@@ -109,13 +109,21 @@ export class TaskGoals {
   async ensure(job, item, total, ancestry = []) {
     await this.ready(job)
     const bot = this.skills.bot
+    if (total - countItem(bot,item) > 64) {
+      while (countItem(bot,item) < total) {
+        const before = countItem(bot,item)
+        await this.ensure(job,item,Math.min(total,before+64),ancestry)
+        if (countItem(bot,item) <= before) throw new Error(`批次备料没有进展：${item}`)
+      }
+      return
+    }
     if (countItem(bot, item) >= total) return
     if (ancestry.includes(item) || ancestry.length >= 12) throw new Error(`资源依赖无法自动解决：${[...ancestry, item].join(' → ')}`)
     const chain = [...ancestry, item]
     for (let pass = 0; pass < 12 && countItem(bot, item) < total; pass++) {
       await this.ready(job)
       const need = Math.min(64, total - countItem(bot, item))
-      const plan = await this.skills.craftPlan({ item, count: need })
+      const plan = await this.skills.craftPlan({ item, count: need }, job.controller.signal)
       await this.ready(job)
       if (!plan.recipeAvailable) {
         const tool = TOOL_FOR[item]

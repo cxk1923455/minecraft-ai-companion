@@ -52,6 +52,7 @@ import { ServerHistory } from './src/serverhistory.mjs'
 import { buildConnectPrompt } from './src/connect-prompt.mjs'
 import { waitForEvents } from './src/wait.mjs'
 import { apply as applyHiyoriSkills } from './extensions/hiyori-survival.mjs'
+import { runtimeState } from './src/runtime-state.mjs'
 
 export const name = 'whale_craft'
 export const inject = ['webServer', 'tools']
@@ -251,8 +252,11 @@ class McSession {
   /* ── "喊我"判定 ── */
 
   mentionRegex() {
-    if (this._mentionRe?.source !== this.config.mentions.join('|')) {
-      this._mentionRe = new RegExp(this.config.mentions.map((p) => `(?:${p})`).join('|'), 'i')
+    const key = JSON.stringify(this.config.mentions)
+    if (this._mentionKey !== key) {
+      const valid = this.config.mentions.filter(p => { try { new RegExp(p, 'i'); return true } catch { return false } })
+      this._mentionRe = new RegExp(valid.length ? valid.map(p => `(?:${p})`).join('|') : '(?!)', 'i')
+      this._mentionKey = key
     }
     return this._mentionRe
   }
@@ -908,6 +912,7 @@ export function apply(ctx, rawConfig) {
       hasWorkspace,
       workspaceName: hasWorkspace ? workspaceTitleOfCwd(cwd) : null,
       commandWhitelist: pluginConfig.get('commandWhitelist'),
+      commandsEnabled: pluginConfig.get('commandsEnabled'),
       allowAllCommands: pluginConfig.get('allowAllCommands'),
       injectWhaleCraftAgentsMd: ws ? ws.injectWhaleCraftAgentsMd : null,
       injectWorkspaceAgentsMd: ws ? ws.injectWorkspaceAgentsMd : null,
@@ -1127,7 +1132,7 @@ export function apply(ctx, rawConfig) {
       const cwd = await cwdOf(body)
       if (cwd) ensureMemoryRootForCwd(cwd)
       // 全局键 → PluginConfig（**无条件**）；三个提示词开关 → **本工作区**的 config.json（有工作区才写）
-      for (const k of ['commandWhitelist', 'allowAllCommands', 'expressEnabled', 'expressBase', 'exposeDebugTools']) {
+      for (const k of ['commandWhitelist', 'commandsEnabled', 'allowAllCommands', 'expressEnabled', 'expressBase', 'exposeDebugTools']) {
         if (body[k] !== undefined) pluginConfig.set(k, body[k])
       }
       // 调试开关变更 → 立即重算各 MC/MC+ 会话的工具可见性（用户 2026-10-05）
@@ -1641,7 +1646,7 @@ export function apply(ctx, rawConfig) {
   ctx.effect(() => ctx.webServer.register(shareRoute), 'whale_craft: /api/whale-craft 路由（发布区）')
 
   // 启动自检标记：确认"插件到底加载了没"（同时写 whale-craft.log 与宿主日志）
-  const startup = `插件已加载｜pid=${process.pid}｜每会话独立实例｜工具注册中…`
+  const startup = `插件已加载｜版本=${PLUGIN_VERSION}｜pid=${process.pid}｜每会话独立实例｜工具注册中…`
   logLine(startup)
   ctx.logger?.info?.(`[whale_craft] ${startup}`)
 
@@ -1656,12 +1661,16 @@ export function apply(ctx, rawConfig) {
    * ------------------------------------------------------------------------ */
   try {
     let logged = 0
-    process.on('unhandledRejection', (reason) => {
+    const reportUnhandled = (reason) => {
       if (logged >= 5) return                    // 别刷爆日志
       logged++
       const stack = reason instanceof Error ? (reason.stack ?? reason.message) : String(reason)
       logLine(`⚠️ 未处理拒绝（宿主可能会因此 exit(1)，栈如下，请据此定位）：${stack.split('\n').slice(0, 6).join(' ⏎ ')}`)
-    })
+    }
+    ctx.effect(() => {
+      process.on('unhandledRejection', reportUnhandled)
+      return () => process.off('unhandledRejection', reportUnhandled)
+    }, 'whale_craft: rejection diagnostics')
   } catch (e) { logLine(`装未处理拒绝记录器失败（不影响使用）：${e?.message ?? e}`) }
 
   const text = (value, render) => ({
@@ -1741,7 +1750,9 @@ export function apply(ctx, rawConfig) {
   const getSession = (exec) => {
     const agent = exec?.agent
     if (!agent) throw new Error('拿不到当前会话（exec.agent 不可用）')
-    return registry.getOrCreate(agent.id)
+    const sess = registry.getOrCreate(agent.id)
+    sess.bot.commandPolicy = name => pluginConfig.commandAllowed(name)
+    return sess
   }
 
   // Register built-in skills synchronously, before mode whitelists are computed.
@@ -2063,7 +2074,7 @@ export function apply(ctx, rawConfig) {
           namespaces: {
             mc_: '游戏内',
             mc_kit_: '游戏外辅助（记忆/画图/交付）',
-            mc_admin_: '管理（MC 模式看不见也调不动；普通模式与 MC+ 模式可见）',
+            mc_admin_: '管理（仅普通管理会话可用；MC / MC+ 游戏会话不能自行修改权限）',
             mc_debug_: '调试（需在「MC设置 → 调试」开启「开放助手调试工具」才在 MC/MC+ 暴露）',
             note: 'mc_* / mc_kit_* 只在 MC模式 / MC+模式 会话里暴露（其他模式隐藏 + guard 硬拒）。',
           },
@@ -2080,6 +2091,7 @@ export function apply(ctx, rawConfig) {
           file: pluginConfig.file,
           keys: Object.keys(DEFAULT_CONFIG),
           commandWhitelist: pluginConfig.get('commandWhitelist'),
+          commandsEnabled: pluginConfig.get('commandsEnabled'),
           allowAllCommands: pluginConfig.get('allowAllCommands'),
           memoryDir: memoryFor(workspaceOf(exec?.agent)).root,
           workspaceConfigFile: wsConfigPath(memoryRootFor(workspaceOf(exec?.agent))),
@@ -2570,21 +2582,19 @@ export function apply(ctx, rawConfig) {
 
   ctx.tools.register(asTool({
     name: 'mc_command',
-    description: '以玩家身份执行服务器指令。**白名单可配置**（默认 tp/give/time/weather/say/gamemode/effect/'
-      + 'setblock/fill/clone/summon/title/clear/xp）。要放行别的指令，在**普通会话**里用 `mc_admin_config` 改 '
-      + '`commandWhitelist`（MC 模式会话改不了）。\n'
-      + '⚠️ 这是**最后手段**：正经动作优先 `mc_act` / `mc_build` / `mc_move`（那些不需要 OP）。',
+    description: '仅在用户明确允许且「MC设置」启用服务器指令时使用，并继续受白名单限制。移动、跟随、采集和建造优先使用生存动作工具。返回 sent 只代表已发送，不能视为服务端执行成功，必须观察世界状态验证。用户禁止指令时不得尝试，也不得用 mc_say 绕过。',
     parameters: { command: { type: 'string', required: true, description: '以 / 开头的完整指令' } },
     output: text(),
     async execute(args, exec) {
       const sess = getSession(exec)
       const raw = String(args.command ?? '').trim()
+      if (pluginConfig.get('commandsEnabled') !== true) throw new Error('服务器指令总权限已关闭。请使用 mc_pathfind / mc_follow / mc_goal 等生存动作；AI 不能自行开启权限。')
       const name = raw.replace(/^\//, '').split(/\s+/)[0].toLowerCase()
       if (!pluginConfig.commandAllowed(name)) {
         throw new Error(`指令 /${name} 不在白名单里。当前白名单：${JSON.stringify(pluginConfig.get('commandWhitelist'))}`
           + '（要放行请在普通会话里用 mc_admin_config 改 commandWhitelist）')
       }
-      return { sent: sess.bot.command(raw, { allow: (n) => pluginConfig.commandAllowed(n) }) }
+      return { sent: sess.bot.command(raw, { allow: (n) => pluginConfig.commandAllowed(n) }), outcome: 'sent', confirmed: false, note: '仅确认指令已发送；服务端可能拒绝。必须查询位置、背包或世界状态验证，不得据此宣称传送、建造或给予物品已成功。' }
     },
   }))
 
@@ -2998,7 +3008,22 @@ export function apply(ctx, rawConfig) {
 
   /** 这条（会话日志里的）消息是不是**我们**（whale_craft）投的插件提示行
    *  —— 认 `kind` 的 **v4 规范值**（回读日志用的判据，与投递侧同一口径；见 user-message.mjs 头注释） */
-  const isOurNotice = (m) => String(m?.source?.kind ?? '') === 'plugin:whale_craft' && m?.source?.form === 'notice'
+  const isWhalePluginNotice = m => String(m?.source?.kind ?? '') === 'plugin:whale_craft' && m?.source?.form === 'notice'
+  const isOurNotice = m => isWhalePluginNotice(m) && (
+    String(m?.source?.summary ?? '').startsWith('提示词注入：')
+    || (m?.content ?? []).some(part => /^Instructions from:/.test(String(part?.text ?? '')))
+  )
+
+  const removeQueuedInstructions = agent => {
+    const inbox = agent?.inbox
+    if (!Array.isArray(inbox?.nextStep)) return
+    for (const message of [...inbox.nextStep]) {
+      if (!isOurNotice(message)) continue
+      if (typeof inbox.remove === 'function' && message.id !== undefined && inbox.remove(message.id) === true) continue
+      const index = inbox.nextStep.indexOf(message)
+      if (index >= 0) inbox.nextStep.splice(index, 1)
+    }
+  }
 
   /** 提示行正文里"它出自哪个文件"（首行 `Instructions from: <rel>`），取不到就 null */
   const noticeRelOf = (m) => {
@@ -3070,7 +3095,7 @@ export function apply(ctx, rawConfig) {
     let removed = 0
     if (inbox && Array.isArray(inbox.nextStep)) {
       for (const m of [...inbox.nextStep]) {
-        if (!isOurNotice(m)) continue
+        if (!isWhalePluginNotice(m)) continue
         try {
           if (typeof inbox.remove === 'function' && m?.id !== undefined && inbox.remove(m.id) === true) { removed++; continue }
           const i = inbox.nextStep.indexOf(m)
@@ -3236,13 +3261,19 @@ export function apply(ctx, rawConfig) {
     try {
       if (!decision || decision.kind !== 'enter') return decision
       const r = reconcileNotices(agent)
-      if (!r.todo.length) return decision
+      const session = agent?.id ? registry.peek(String(agent.id)) : null
+      let live = null
+      if (session?.bot.online && isMcModeAgent(agent)) {
+        const state = runtimeState(session.bot, { commandsEnabled: pluginConfig.get('commandsEnabled') })
+        live = userMessage({source:{kind:'plugin:whale_craft',form:'notice',summary:'MC实时状态'},content:[{type:'text',text:'【MC实时状态｜以此校验行动报告】'+JSON.stringify(state)+'。sent/started 不等于完成；距离未接近时不要声称已在玩家身边。'}]})
+      }
+      if (!r.todo.length) return live ? {...decision,messages:[...(decision.messages??[]).filter(m=>m?.source?.summary!=='MC实时状态'),live]} : decision
       // 队列里若有残留的自家提示行，先摘掉：它们马上要作为**本步消息**送出去了，
       // 留着会让下一步再送一遍（重复注入）。
-      try { withdrawAgentsMdNotices(agent) } catch { /* 摘不掉也不影响本步 */ }
+      try { removeQueuedInstructions(agent) } catch { /* 摘不掉也不影响本步 */ }
       markNoticesSent(agent, r.todo)
       const msgs = (decision.messages ?? []).filter((m) => !isOurNotice(m))
-      const out = { ...decision, messages: [...noticeMessagesFor(r.todo), ...msgs] }
+      const out = { ...decision, messages: [...noticeMessagesFor(r.todo), ...msgs, ...(live?[live]:[])] }
       return out
     } catch (e) {
       // 绝不带崩这一轮：改写失败就用内层原样结果。
@@ -3838,13 +3869,19 @@ export function apply(ctx, rawConfig) {
   const mcPresetIdOf = (agent) => {
     if (!agent?.ctx) return null
     try {
-      let svc = agentPresetsSvc
-      if (!svc) { try { svc = agent.ctx.get('agentPresets') } catch { svc = null } }
-      if (!svc) { try { svc = ctx.get('agentPresets') } catch { svc = null } }
-      const id = svc?.composedPreset?.(agent.ctx)
-      if (typeof id === 'string' && id) { lastPresetSeen.set(agent, id); return id }
-      return null
-    } catch { return null }
+      let local
+      let global
+      try { local = agent.ctx.get?.('agentPresets') } catch {}
+      try { global = ctx.get('agentPresets') } catch {}
+      for (const svc of new Set([local, agentPresetsSvc, global])) {
+        if (!svc) continue
+        try {
+          const id = svc.composedPreset?.(agent.ctx)
+          if (typeof id === 'string' && id) { lastPresetSeen.set(agent, id); return id }
+        } catch {}
+      }
+      return lastPresetSeen.get(agent) ?? null
+    } catch { return lastPresetSeen.get(agent) ?? null }
   }
 
   const isMcModeAgent = (agent) => pluginConfig.isMcModePreset(mcPresetIdOf(agent))
@@ -3974,8 +4011,8 @@ export function apply(ctx, rawConfig) {
     // MC+：不套白名单（见上面注释）；guard 对它只保留凭据路径拒绝。
     // 🔴 但调试工具未启用时要**从可见面摘掉**（用户 2026-10-05：debug 只在开启后暴露在 MC/MC+）。
     if (isPlus) {
-      if (!pluginConfig.exposeDebugTools) {
-        const debugNames = ourToolNames.filter((n) => n.startsWith('mc_debug_'))
+      {
+        const debugNames = ourToolNames.filter((n) => n.startsWith('mc_admin_') || (!pluginConfig.exposeDebugTools && n.startsWith('mc_debug_')))
         if (debugNames.length) {
           try {
             const t = scopedTools(agent.ctx)
@@ -4066,6 +4103,7 @@ export function apply(ctx, rawConfig) {
   const liftMcModePolicy = (agent) => {
     if (!agent) return
     const was = mcPolicyKind.get(agent)
+    if (was === 'other') return
     // 这个会话已经不是 MC 模式了 → "因没选工作区被拒绝"的旧标记也一起清掉
     if (agent.id) noWorkspaceRefused.delete(String(agent.id))
     // ① 撤回提示行（还没投递的直接删；已经进对话的补一条作废声明）——见 withdrawAgentsMdNotices
@@ -4097,6 +4135,8 @@ export function apply(ctx, rawConfig) {
       const presetId = agent ? mcPresetIdOf(agent) : null
       const isMc = pluginConfig.isMcModePreset(presetId)
       const isPlus = pluginConfig.isMcPlusPreset(presetId)
+
+      if ((isMc || isPlus) && name.startsWith('mc_admin_')) return '游戏会话不能自行修改全局权限；请由用户在 MC设置 中管理。'
 
       // ① 凭据硬拒：两种 MC 模式都保留（"凭据不进模型上下文"是插件不变式）
       if ((isMc || isPlus) && /^(read|edit|write|glob|grep|ls|cat|read_image|mc_kit_memory)$/i.test(name)) {
@@ -4221,7 +4261,9 @@ export function apply(ctx, rawConfig) {
         else mcModeAgentIds.delete(String(sessionId))
         if (pluginConfig.isMcPlusPreset(presetId)) mcPlusAgentIds.add(String(sessionId))
         else mcPlusAgentIds.delete(String(sessionId))
-        touch(safeAgentById(sessionId))
+        const agent = safeAgentById(sessionId)
+        if (agent && typeof presetId === 'string' && presetId) lastPresetSeen.set(agent, presetId)
+        touch(agent)
       }))
     } catch { /* 老宿主没有这个事件 */ }
 
@@ -4276,12 +4318,12 @@ export function apply(ctx, rawConfig) {
   ctx.tools.register(asTool({
     name: 'mc_admin_config',
     description: '【管理】读写 whale_craft 的**全局配置**（服务器指令白名单、MC 模式的工具暴露、记忆目录…）。\n'
-      + '⚠️ **MC 模式会话看不见、也调不动它**（要改配置就在普通会话或 MC+模式 里改）。\n'
+      + '⚠️ **MC / MC+ 游戏会话不能使用**。由用户在 MC设置 中管理；普通管理会话才可使用此工具。\n'
       + 'action：\n'
       + '· get（默认）看生效配置；给 path 只看某一项\n'
       + '· set   改一项（path + value）\n'
       + '· unset 删掉一项（回到默认值）· reset 全部恢复默认 · list 看默认值 + 生效值\n'
-      + '可用键：`commandWhitelist`（字符串数组；支持 "tp" 精确名、"/^gi.*/" 正则、"*" 全放行）· '
+      + '可用键：`commandsEnabled`（指令总权限，默认 false）· `commandWhitelist`（字符串数组；支持 "tp" 精确名、"/^gi.*/" 正则、"*" 全放行）· '
       + '`mcModePresets`（哪些 preset 算 MC 模式——应含 MC+ 的 id）· `mcPlusPresets`（哪些算 MC+ 变体：'
       + '开放标准模式全部工具）· `mcMode.allowOtherTools`（MC 模式白名单里**额外**放行的工具）· '
       + '`mcMode.hideAdminTools`（默认 true）· `expressEnabled`（文件分享开关：true 开 / false 关）· '
@@ -4293,8 +4335,9 @@ export function apply(ctx, rawConfig) {
       value: { type: 'json', description: 'set 用的值（数组 / 字符串 / 布尔 / 对象）' },
     },
     output: text(),
-    async execute(args) {
+    async execute(args, exec) {
       const action = String(args.action ?? 'get').toLowerCase()
+      if (isMcModeAgent(exec?.agent)) throw new Error('游戏会话不能自行读取或修改全局权限，请由用户在 MC设置 中管理。')
       const info = { file: pluginConfig.file, lastError: pluginConfig.lastError ?? null }
       switch (action) {
         case 'get':

@@ -117,9 +117,12 @@ export class SurvivalSkills {
   }
   status() {
     const samples = [...this.decisionSamples].sort((a, b) => a - b)
+    const target = this.follow ? this.findPlayer(this.follow) : null
+    const distance = target?.position && this.raw?.entity?.position ? this.raw.entity.position.distanceTo(target.position) : null
     return {
       online: this.host.online, active: this.active?.label ?? null,
-      follow: this.follow ? { player: this.follow, suspended: this.busy || this.paused || this.goals.running, phase: this.followState.phase, recoveryAttempts: this.followState.attempts } : null,
+      position: position(this.raw?.entity?.position),
+      follow: this.follow ? { player: this.follow, visible: Boolean(target), distance: distance === null ? null : Number(distance.toFixed(2)), verifiedNearby: distance !== null && distance <= this.settings.followDistance + 0.5, suspended: this.busy || this.paused || this.goals.running, phase: this.followState.phase, recoveryAttempts: this.followState.attempts } : null,
       settings: { ...this.settings }, paused: this.paused,
       lastResult: this.lastResult, pathfinding: 'A* / 5ms search slices',
       waitingForCancelledAction: Boolean(this.quarantine),
@@ -173,8 +176,9 @@ export class SurvivalSkills {
     try {
       const result = await runAbortableOperation(task, combined, onAbort)
       check(combined)
-      this.lastResult = { label, outcome: result?.outcome ?? 'succeeded', durationMs: Date.now() - operation.startedAt }
-      return result
+      const outcome = result?.outcome ?? (result?.arrived === false || result?.ok === false || Number(result?.failed) > 0 ? 'partial' : result?.arrived === true || result?.ok === true ? 'succeeded' : 'unverified')
+      this.lastResult = { label, outcome, durationMs: Date.now() - operation.startedAt }
+      return result && typeof result === 'object' && !Array.isArray(result) ? { ...result, outcome } : result
     } catch (e) {
       this.lastResult = { label, outcome: combined.aborted ? 'cancelled' : 'failed', error: e.message, durationMs: Date.now() - operation.startedAt }
       throw e
@@ -199,6 +203,7 @@ export class SurvivalSkills {
   }
 
   findPlayer(name) {
+    if (typeof name !== 'string') return null
     const entry = Object.entries(this.raw?.players ?? {}).find(([key]) => key.toLowerCase() === name.toLowerCase())?.[1]
     return entry?.entity
   }
@@ -230,11 +235,15 @@ export class SurvivalSkills {
     this.followState = { phase: 'waiting', attempts: 0, lastProgressAt: Date.now(), position: b.entity.position.clone() }
     this.paused = false
     this.restoreFollow()
-    return { ...this.status(), visible: Boolean(this.findPlayer(this.follow)) }
+    return { ...this.status(), outcome: 'started', visible: Boolean(this.findPlayer(this.follow)), note: '持续跟随已启动，不等于已经到达；请依据 follow.distance、verifiedNearby 和 phase 确认实际距离。' }
   }
   async navigate(args, signal) {
     const budget = boundedInteger(args.budgetMs, 30000, 1000, 120000, 'budgetMs')
-    return this.run('智能寻路', signal, async (s, b) => {
+    return this.run('智能寻路', signal, (s, b) => this.navigateBody(args, s, b, budget), budget + 500)
+  }
+  async navigateBody(args, signal, b = this.bot, budgetMs = 30000) {
+      check(signal)
+      const startedAt = Date.now()
       const target = args.who ? this.findPlayer(String(args.who))?.position : args
       if (!target || !['x', 'y', 'z'].every(k => Number.isFinite(Number(target[k])))) throw new Error('需要有效坐标，或附近可见玩家 who')
       const range = boundedInteger(args.range, 2, 1, 8, 'range')
@@ -242,9 +251,12 @@ export class SurvivalSkills {
       b.pathfinder.movements.canDig = false
       b.pathfinder.movements.allow1by1towers = false
       this.host._selfMovingAt = Date.now()
-      const result = await patchedGoto(b, new goals.GoalNear(Number(target.x), Number(target.y), Number(target.z), range), { signal: s })
-      return { ...result, outcome: result.ok ? 'succeeded' : 'partial' }
-    }, budget + 500)
+      const result = await this.guarded(patchedGoto(b, new goals.GoalNear(Number(target.x), Number(target.y), Number(target.z), range), { signal }), signal, budgetMs)
+      const currentTarget = args.who ? this.findPlayer(String(args.who))?.position : target
+      const actual = b.entity.position
+      const distance = currentTarget ? actual.distanceTo(new Vec3(Number(currentTarget.x), Number(currentTarget.y), Number(currentTarget.z))) : null
+      const arrived = Boolean(result.ok && distance !== null && distance <= range + 0.5)
+      return { ...result, ok: arrived, arrived, ms: Date.now() - startedAt, position: position(actual), target: currentTarget ? position(currentTarget) : null, player: args.who ?? null, remaining: distance === null ? null : Number(distance.toFixed(2)), confirmed: arrived, outcome: arrived ? 'succeeded' : 'partial', reason: arrived ? null : !currentTarget ? '目标玩家已不可见' : result.reason ?? '实际位置尚未接近当前目标' }
   }
 
   async collect(args, signal) {
@@ -289,7 +301,7 @@ export class SurvivalSkills {
     }, budget)
   }
 
-  craftPlan(args) {
+  craftPlan(args, signal) {
     const b = this.bot
     const item = String(args.item ?? '').replace(/^minecraft:/, '')
     if (!item) throw new Error('需要物品名称 item')
@@ -302,7 +314,7 @@ export class SurvivalSkills {
       for (const name of Object.keys(preferences).filter(name => name.endsWith('_log'))) preferences[name] = seenWood.includes(name) ? 0 : 10
     }
     return planInWorker({ version: b.version, item, count: boundedInteger(args.count, 1, 1, 64, 'count'), resourcePreferences: preferences,
-      inventory: b.inventory.items().map(entry => ({ name: entry.name, count: entry.count })) })
+      inventory: b.inventory.items().map(entry => ({ name: entry.name, count: entry.count })) }, { signal })
   }
   async inventoryBarrier(b, signal) {
     const client = b._client
@@ -326,7 +338,7 @@ export class SurvivalSkills {
     if (!result.ok) throw new Error(`无法到达 ${block.name}：${result.reason}`)
   }
   async craft(args, signal) {
-    const plan = await this.craftPlan(args)
+    const plan = await this.craftPlan(args, signal)
     if (args.planOnly || !plan.recipeAvailable || !plan.canCraftNow) return { outcome: args.planOnly ? 'planned' : 'blocked', plan }
     const budget = boundedInteger(args.budgetMs, 180000, 1000, 300000, 'budgetMs')
     return this.run(`合成 ${plan.targetItem}`, signal, async (s, b) => {
@@ -380,9 +392,10 @@ export class SurvivalSkills {
     const furnace = await this.guarded(b.openFurnace(furnaceBlock), signal, 10000)
     try {
       if (furnace.inputItem() || furnace.outputItem() || furnace.fuelItem()) throw new Error('熔炉已有物品；请选用空熔炉，避免混入他人物品')
-      const input = b.inventory.items().find(item => item.name === inputName && item.count >= quantity)
-      const fuel = b.inventory.items().find(item => item.name === 'coal' && item.count >= Math.ceil(quantity / 8))
-      if (!input || !fuel) throw new Error(`需要 ${quantity} 个 ${inputName} 和 ${Math.ceil(quantity / 8)} 个 coal`)
+      const input = b.inventory.items().find(item => item.name === inputName)
+      const fuel = b.inventory.items().find(item => item.name === 'coal')
+      const matchingCount = item => item ? b.inventory.items().filter(entry => entry.name === item.name && entry.metadata === item.metadata).reduce((sum, entry) => sum + entry.count, 0) : 0
+      if (matchingCount(input) < quantity || matchingCount(fuel) < Math.ceil(quantity / 8)) throw new Error(`需要 ${quantity} 个 ${inputName} 和 ${Math.ceil(quantity / 8)} 个 coal`)
       const before = counts(b)[outputName] ?? 0
       await this.guarded(furnace.putFuel(fuel.type, fuel.metadata, Math.ceil(quantity / 8)), signal)
       check(signal)

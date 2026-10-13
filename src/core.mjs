@@ -401,6 +401,7 @@ export class McBot extends EventEmitter {
   constructor (config = {}) {
     super()
     this.cfg = { ...DEFAULTS, ...config }
+    this.commandPolicy = typeof config.commandPolicy === 'function' ? config.commandPolicy : () => false
     // 实例标识：多会话各自一个 McBot，锁文件按实例分开（同进程 pid 相同，共用一个锁会互相误删）
     this.instanceId = String(config.instanceId ?? 'default').replace(/[^\w.-]/g, '_')
     if (!existsSync(dirname(this.cfg.logFile))) mkdirSync(dirname(this.cfg.logFile), { recursive: true })
@@ -1079,7 +1080,6 @@ export class McBot extends EventEmitter {
   wireChatEvents (b) {
     b.on('message', (msg, position) => {
       const text = this.#plain(msg)
-      if (position === 'chat') return                    // 签名聊天：player_chat 那条路已处理
       if (position !== 'game_info') {                    // 动作栏除外，其余都按内容再判一次
         const parsed = this.#playerChatFrom(msg, text)
         if (parsed) {
@@ -1091,10 +1091,14 @@ export class McBot extends EventEmitter {
       this.emit('system', { text })
     })
     b._client?.on?.('player_chat', (p) => {
-      const who = String(p?.networkName?.value ?? p?.networkName ?? '?')
+      let sender = p?.senderName ?? p?.networkName?.value ?? p?.networkName ?? '?'
+      try { if (typeof sender === 'string' && sender.startsWith('{')) sender = JSON.parse(sender) } catch {}
+      const who = typeof sender === 'object' ? String(sender?.text ?? sender?.value ?? '?') : String(sender)
       const text = p?.plainMessage ?? ''
       this.#emitPlayerChat(who, text, b.username)
     })
+    // Mineflayer normalizes legacy, signed and server-formatted chat patterns.
+    for (const event of ['chat', 'whisper']) b.on(event, (who, text) => this.#emitPlayerChat(who, text, b.username))
     return b
   }
 
@@ -1112,7 +1116,11 @@ export class McBot extends EventEmitter {
     if (!t) return
     const key = `${w}\u0000${t}`
     const now = Date.now()
-    if (this._lastChatKey === key && now - (this._lastChatAt ?? 0) < 1500) return
+    this._recentChatKeys ??= new Map()
+    for (const [seenKey, at] of this._recentChatKeys) if (now - at >= 1500) this._recentChatKeys.delete(seenKey)
+    if (this._recentChatKeys.has(key)) return
+    this._recentChatKeys.set(key, now)
+    if (this._recentChatKeys.size > 256) this._recentChatKeys.delete(this._recentChatKeys.keys().next().value)
     this._lastChatKey = key
     this._lastChatAt = now
     this.#pushChat('player', w, t)
@@ -1141,7 +1149,7 @@ export class McBot extends EventEmitter {
     const partText = (p) => {
       if (p === null || p === undefined) return ''
       if (typeof p === 'string') return p
-      if (typeof p.text === 'string') return p.text
+      if (typeof p.text === 'string') return p.text + (Array.isArray(p.extra) ? p.extra.map(partText).join('') : '')
       try { return String(p) } catch { return '' }
     }
 
@@ -1557,7 +1565,8 @@ export class McBot extends EventEmitter {
 
   chatSay (text) {
     const b = this.requireBot()
-    const t = String(text).replace(/[\r\n]+/g, ' ').slice(0, 220)
+    const t = String(text).replace(/[\r\n]+/g, ' ').trim().slice(0, 220)
+    if (t.startsWith('/')) throw new Error('mc_say 只允许普通聊天，不能发送服务器指令。')
     b.chat(t)
     this.#pushChat('self', b.username, t)
     return t
@@ -1565,6 +1574,9 @@ export class McBot extends EventEmitter {
 
   async walkTo (target, { arrive = 1.6, budget = this.cfg.moveBudgetMs } = {}) {
     const b = this.requireBot()
+    if (b.pathfinder && this.skills.raw === b) {
+      return this.skills.navigateBody({ ...target, range: Math.min(8, Math.max(1, Math.ceil(arrive))) }, this.abortSignal, b, Math.min(120000, Math.max(1000, Number(budget) || 30000)))
+    }
     const t0 = Date.now()
     let last = b.entity.position.clone()
     let lastProgress = Date.now()
@@ -2071,7 +2083,10 @@ export class McBot extends EventEmitter {
       if (Date.now() - t0 > budgetMs) { results.push({ i, op: steps[i]?.op, ok: false, error: `总预算 ${budgetMs}ms 用尽` }); break }
       const step = steps[i] ?? {}
       try {
-        results.push({ i, op: step.op, ok: true, ...(await this.#runStep(step)) })
+        const value = await this.#runStep(step)
+        const ok = value?.arrived !== false && value?.ok !== false && !['partial', 'blocked', 'cancelled', 'failed'].includes(value?.outcome)
+        results.push({ i, op: step.op, ...value, ok })
+        if (!ok && stopOnError) break
       } catch (e) {
         results.push({ i, op: step.op, ok: false, error: e.message })
         if (stopOnError) break
@@ -2080,6 +2095,8 @@ export class McBot extends EventEmitter {
     const okCount = results.filter((r) => r.ok).length
     return {
       requested: steps.length, succeeded: okCount, failed: results.length - okCount,
+      completed: results.length === steps.length && okCount === steps.length,
+      outcome: results.length === steps.length && okCount === steps.length ? 'succeeded' : 'partial',
       elapsedMs: Date.now() - t0, results,
     }
   }
@@ -2146,7 +2163,9 @@ export class McBot extends EventEmitter {
     const b = this.requireBot()
     const c = String(cmd).trim()
     if (!c.startsWith('/')) throw new Error('指令必须以 / 开头')
+    if (/[\r\n\u0000]/.test(c)) throw new Error('服务器指令必须为单行文本')
     const name = c.slice(1).split(/\s+/)[0].toLowerCase()
+    if (!this.commandPolicy(name)) throw new Error(`服务器指令权限已关闭或未放行：/${name}`)
     const ok = typeof allow === 'function' ? Boolean(allow(name)) : DEFAULT_COMMAND_WHITELIST.has(name)
     if (!ok) throw new Error(`指令不在白名单：/${name}`)
     b.chat(c)
