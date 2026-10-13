@@ -1,0 +1,114 @@
+{
+  "name": "whale_craft",
+  "version": "0.2.0-beta.2.hiyori.2",
+  "description": "让 DSH 加入 Minecraft 服务器游玩：有自己的游戏角色，能探索、建造、聊天。",
+  "keywords": [
+    "dsh",
+    "dsh-plugin",
+    "deepseek-harness",
+    "minecraft",
+    "mineflayer",
+    "agent"
+  ],
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/cxk1923455/minecraft-ai-companion.git"
+  },
+  "homepage": "https://github.com/cxk1923455/minecraft-ai-companion#readme",
+  "bugs": {
+    "url": "https://github.com/cxk1923455/minecraft-ai-companion/issues"
+  },
+  "engines": {
+    "node": ">=22",
+    "dsh": ">=0.2.0-rc.2 <0.3.0"
+  },
+  "type": "module",
+  "main": "index.js",
+  "exports": {
+    ".": "./index.js",
+    "./client": "./client.js",
+    "./locale/en.json": "./locale/en.json",
+    "./locale/zh.json": "./locale/zh.json",
+    "./presets/*.patch.yml": "./presets/*.patch.yml",
+    "./package.json": "./package.json"
+  },
+  "files": [
+    "index.js",
+    "client.js",
+    "selfcheck.mjs",
+    "cordis.patch.yml",
+    "presets",
+    "src",
+    "tools",
+    "extensions",
+    "locale",
+    "licenses",
+    "test",
+    "HIYORI-INTEGRATION.md",
+    "README.md",
+    "CHANGELOG.md",
+    "THIRD_PARTY_NOTICES.md"
+  ],
+  "dependencies": {
+    "mineflayer": "^4.37.1",
+    "mineflayer-collectblock": "1.6.0",
+    "mineflayer-pathfinder": "2.4.5",
+    "mineflayer-tool": "1.2.0",
+    "vec3": "^0.1.7"
+  },
+  "optionalDependencies": {
+    "sharp": "^0.35.3"
+  },
+  "peerDependencies": {
+    "@deepseek-ai/dsh-llm": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/dsh-tools": ">=0.2.0-rc.2 <0.3.0",
+    "@deepseek-ai/schemastery": "*"
+  },
+  "peerDependenciesMeta": {
+    "@deepseek-ai/dsh-llm": {
+      "optional": true
+    },
+    "@deepseek-ai/dsh-tools": {
+      "optional": true
+    },
+    "@deepseek-ai/schemastery": {
+      "optional": true
+    }
+  },
+  "devDependencies": {
+    "esbuild": "^0.25.0",
+    "@deepseek-ai/dsh-llm": "*",
+    "@deepseek-ai/dsh-tools": "0.0.1-rc.1",
+    "@deepseek-ai/schemastery": "^3.18.2"
+  },
+  "dsh": {
+    "bundle": {
+      "patch": [
+        "./cordis.patch.yml",
+        "./presets/minecraft.patch.yml",
+        "./presets/minecraft-plus.patch.yml"
+      ]
+    },
+    "client": {
+      "platform": "web"
+    }
+  },
+  "publishConfig": {
+    "access": "public",
+    "registry": "https://registry.npmjs.org/"
+  },
+  "scripts": {
+    "check": "node tools/check-core.mjs && node selfcheck.mjs && node --test test/*.test.mjs",
+    "test:survival": "node --test test/*.test.mjs",
+    "build:hiyori": "node tools/build-hiyori.mjs",
+    "dev:web": "node tools/dev.mjs web",
+    "dev:desktop": "node tools/dev.mjs desktop",
+    "dev:link": "node tools/dev.mjs link",
+    "dev:status": "node tools/dev.mjs status",
+    "dev:stop": "node tools/dev.mjs stop",
+    "prepublishOnly": "npm run check",
+    "publish:npm": "node scripts/publish-npm.mjs",
+    "release:workflow-fix": "node scripts/land-workflow-fix.mjs"
+  }
+}

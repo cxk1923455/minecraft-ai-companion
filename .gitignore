@@ -1,0 +1,15 @@
+node_modules/
+logs/
+*.log
+.env
+.env.*
+!.env.example
+accounts.json
+config.json
+state/
+.whale-craft/
+*.zip
+*.tgz
+package-manifest.json
+.DS_Store
+Thumbs.db
