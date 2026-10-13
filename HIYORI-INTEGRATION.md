@@ -1,6 +1,6 @@
 # Whale Craft 的 Hiyori Minecraft 功能移植
 
-本地增强版：`0.2.0-beta.2.hiyori.2`，基于你提供的 `whale_craft-0.2.0-beta.2.zip`。
+本地增强版：`0.2.0-beta.2.hiyori.3`，基于你提供的 `whale_craft-0.2.0-beta.2.zip`。
 
 保留 DSH 原生插件、每会话一个机器人、连接界面、离线/皮肤站账号、看门狗、记忆和原有建造工具。
 新技能使用当前会话已有的 Mineflayer 实例；不需要 Hiyori 桌面程序、Electron、语音服务或额外模型 API。
@@ -103,3 +103,10 @@ node tools/check-standalone-import.mjs
 
 原版自检增加了 10 个工具的计数，并修复“打印失败但 exit(0)”的问题；DNS 提示验证改为离线错误夹具，避免代理干扰。
 Hiyori 原始 MIT 许可保留在 `licenses/Hiyori-MIT.txt`，详见 `THIRD_PARTY_NOTICES.md`。
+
+## Git 安装排查
+
+`pnpm add` 日志显示 `Done` 只说明包安装步骤结束，仍需要 DSH 完成插件启用。
+本版修复了 vec3 0.1.7 的命名导出兼容性问题；原 hiyori.2 在这种依赖版本下不能加载。
+如果 Git 安装界面持续停留在安装中，先取消当前安装，再使用 Releases 中的 hiyori.3 ZIP 本地安装方式。
+不要仅把 package.json 中的依赖写进去：profile 的 dsh.profile.bundles 还需要包含 whale_craft，随后重启 DSH。

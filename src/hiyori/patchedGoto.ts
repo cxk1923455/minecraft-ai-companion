@@ -1,5 +1,6 @@
 import type { Bot } from 'mineflayer';
-import { Vec3 } from 'vec3';
+import vec3pkg from 'vec3';
+const { Vec3 } = vec3pkg;
 
 const SPRINT_SPEED = 5.6;
 const JUMP_TIME = 0.6;

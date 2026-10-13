@@ -1,4 +1,6 @@
-import { Vec3 } from 'vec3';
+import vec3pkg from 'vec3';
+import type { Vec3 as Vec3Type } from 'vec3';
+const { Vec3 } = vec3pkg;
 
 const LIQUID_NAMES = new Set(['water', 'flowing_water', 'lava', 'flowing_lava']);
 const MAX_VERTICAL_FLOW_LOOKAHEAD = 32;
@@ -81,6 +83,6 @@ function offset(
   x: number,
   y: number,
   z: number,
-): Vec3 {
+): Vec3Type {
   return new Vec3(position.x + x, position.y + y, position.z + z);
 }

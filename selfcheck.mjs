@@ -16,7 +16,7 @@ import { fileURLToPath } from 'node:url'
 let selfcheckFailures = 0
 const selfcheckPrint = console.log.bind(console)
 console.log = (...args) => {
-  if (args.some(arg => typeof arg === 'string' && arg.includes('❌'))) selfcheckFailures++
+  if (args.some(arg => typeof arg === 'string' && /^\s*❌/m.test(arg))) selfcheckFailures++
   selfcheckPrint(...args)
 }
 

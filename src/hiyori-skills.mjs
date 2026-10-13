@@ -1,3 +1,4 @@
+// Hiyori extracted helpers — MIT; original sources are in src/hiyori/.
 import { createRequire as __createRequire } from 'node:module'; const require = __createRequire(import.meta.url);
 var __require = /* @__PURE__ */ ((x) => typeof require !== "undefined" ? require : typeof Proxy !== "undefined" ? new Proxy(x, {
   get: (a, b) => (typeof require !== "undefined" ? require : a)[b]
@@ -482,7 +483,8 @@ function recipeDropIds(block) {
 }
 
 // src/hiyori/patchedGoto.ts
-import { Vec3 } from "vec3";
+import vec3pkg from "vec3";
+var { Vec3 } = vec3pkg;
 var SPRINT_SPEED = 5.6;
 var JUMP_TIME = 0.6;
 var PARKOUR_TIME = 1;
@@ -697,7 +699,8 @@ function observeEnvironment(bot) {
 }
 
 // src/hiyori/fluidSafety.ts
-import { Vec3 as Vec32 } from "vec3";
+import vec3pkg2 from "vec3";
+var { Vec3: Vec32 } = vec3pkg2;
 var LIQUID_NAMES = /* @__PURE__ */ new Set(["water", "flowing_water", "lava", "flowing_lava"]);
 var MAX_VERTICAL_FLOW_LOOKAHEAD = 32;
 var FLUID_BREAK_GUARD = Symbol("hiyori-fluid-break-guard");
