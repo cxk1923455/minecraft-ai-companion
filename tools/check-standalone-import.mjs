@@ -11,13 +11,14 @@
  * ============================================================================
  */
 import { execFileSync } from 'node:child_process'
-import { existsSync, mkdtempSync, rmSync, writeFileSync } from 'node:fs'
+import { existsSync, mkdtempSync, realpathSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
-import { dirname, join } from 'node:path'
+import { basename, dirname, join } from 'node:path'
 import { fileURLToPath } from 'node:url'
 
 const root = fileURLToPath(new URL('..', import.meta.url))
-const dir = mkdtempSync(join(tmpdir(), 'whale-standalone-'))
+const scratchRoot = realpathSync(tmpdir())
+const dir = mkdtempSync(join(scratchRoot, 'whale-standalone-'))
 
 /** npm 入口：优先 <node>/node_modules/npm/bin/npm-cli.js（Windows 官方包装法），
  *  POSIX 官方布局在 ../lib/node_modules/…；都没有再退到 PATH 上的 npm（Windows 需要 shell 才能跑 .cmd）。 */
@@ -55,7 +56,13 @@ try {
 } catch (e) {
   detail = String(e.stdout ?? '').trim() || String(e.stderr ?? '').trim() || String(e.message ?? e)
 } finally {
-  if (ok) { try { rmSync(dir, { recursive: true, force: true }) } catch {} }
+  if (ok) {
+    try {
+      const cleanupPath = realpathSync(dir)
+      if (dirname(cleanupPath) !== scratchRoot || !basename(cleanupPath).startsWith('whale-standalone-')) throw new Error('Refusing cleanup outside the created scratch directory')
+      rmSync(cleanupPath, { recursive: true, force: true })
+    } catch {}
+  }
 }
 
 if (ok) {

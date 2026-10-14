@@ -2,7 +2,7 @@
 
 让 AI 作为陪玩接入 Minecraft Java 局域网世界或离线服务器。
 
-当前增强版 hiyori.7：分段上下坡探索、通用木材备料、原目标恢复、看门狗进度合并与投递重试，以及不依赖图片的结构化世界观测。逐项修改理由、收益、指标和替代项目比较见 [OPTIMIZATION-V7.md](OPTIMIZATION-V7.md)；数据接口细节见 [OBSERVATION-DESIGN.md](OBSERVATION-DESIGN.md)。
+当前增强版 hiyori.8：修复采矿拾取等待导致身体永久卡住，限制原生寻路的节点与内存占用，提供真实恢复状态及卡住连接的有界回收。崩溃证据、修复理由和内存压测见 [CRASH-RECOVERY-V8.md](CRASH-RECOVERY-V8.md)。保留分段上下坡探索、通用木材备料、原目标恢复、看门狗投递重试与结构化世界观测；此前优化及替代项目比较见 [OPTIMIZATION-V7.md](OPTIMIZATION-V7.md)，数据接口见 [OBSERVATION-DESIGN.md](OBSERVATION-DESIGN.md)。
 
 这是基于 [Whale Craft](https://github.com/yzi1b/whale-craft) 0.2.0-beta.2 的增强版，集成 Hiyori Minecraft 辅助技能，保留 DSH 原生插件界面和每会话一个机器人。目前通过 DSH 工具接口接入 AI，尚未实现通用 MCP 协议服务。
 
@@ -27,7 +27,7 @@
 # Whale Craft / 鲸鱼工艺
 
 > 本目录是基于用户提供的 `0.2.0-beta.2` 制作的本地 Hiyori 增强版
-> `0.2.0-beta.2.hiyori.7`。包含地形探索、目标恢复、结构化观测、持续采矿、生存寻路、跟随、容器与常用玩家操作。
+> `0.2.0-beta.2.hiyori.8`。包含采集取消与内存保护、地形探索、目标恢复、结构化观测、持续采矿、生存寻路、跟随、容器与常用玩家操作。
 > 具体能力、用法与实测边界见 [玩家能力说明](PLAYER-CAPABILITIES.md)。当前共有 54 个原生工具；增强版没有发布到公共 npm。
 > 安装与新增工具说明见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。下文保留原版说明。
 

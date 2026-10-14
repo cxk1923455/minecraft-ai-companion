@@ -13,6 +13,7 @@ import { tradeAction, stationAction, controlsAction } from './stations.mjs'
 import { AgentController } from './agent-controller.mjs'
 import { attachDoorwayNavigation, doorwayRevision, enterRoom, shouldResumeBlockedFollow } from './doorway-navigation.mjs'
 import { collectTarget } from './target-collection.mjs'
+import { attachPathfinderBudget } from './pathfinder-budget.mjs'
 import { recipesSourceFor, patchedGoto, assessExcavationFluidRisk, runAbortableOperation, smeltInputFor } from './hiyori-skills.mjs'
 
 const { pathfinder, goals } = pathfinderPkg
@@ -48,6 +49,9 @@ export class SurvivalSkills {
     this.raw = null
     this.active = null
     this.quarantine = null
+    this.bodyRecovery = null
+    this.recoveryTimer = null
+    this.healthTimer = null
     this.follow = null
     this.followState = { phase: 'inactive', attempts: 0, lastProgressAt: 0, position: null }
     this.paused = false
@@ -91,11 +95,13 @@ export class SurvivalSkills {
     this.detach('切换游戏身体')
     this.raw = b
     this.quarantine = null
+    this.bodyRecovery = null
     this.paused = false
     if (!b.pathfinder) b.loadPlugin(pathfinder)
     if (!b.tool) b.loadPlugin(toolPkg.plugin)
     if (!b.collectBlock) b.loadPlugin(collectPkg.plugin)
     b.pathfinder.setMovements(this.movements(b))
+    this.pathBudget = attachPathfinderBudget(b)
     this.detachDoorwayNavigation = attachDoorwayNavigation(b)
     this.doorController = new AbortController()
     if (typeof b.activateBlock === 'function') {
@@ -130,6 +136,15 @@ export class SurvivalSkills {
     b.collectBlock.movements = this.movements(b)
     b.on('physicsTick', this.tick)
     b.on('respawn', this.onRespawn)
+    this.lastHealthLog = 0
+    this.healthTimer = setInterval(() => {
+      if (this.raw !== b || !this.host.online) return
+      if (Date.now() - this.lastHealthLog >= 30000 && (this.active || this.goals.running || this.follow || this.quarantine)) {
+        this.lastHealthLog = Date.now()
+        this.host.log('游戏执行健康状态：', JSON.stringify({ active: this.active?.label ?? null, quarantineMs: this.quarantine ? Date.now() - this.quarantine.waitingSince : 0, ...this.pathBudget.snapshot() }))
+      }
+    }, 1000)
+    this.healthTimer.unref?.()
     return b
   }
 
@@ -164,6 +179,10 @@ export class SurvivalSkills {
     this.halt(reason)
     this.detachDoorwayNavigation?.()
     this.detachDoorwayNavigation = null
+    this.pathBudget?.detach()
+    this.pathBudget = null
+    clearTimeout(this.recoveryTimer); this.recoveryTimer = null
+    clearInterval(this.healthTimer); this.healthTimer = null
     this.doorController?.abort(reason)
     if (this.raw?.activateBlock === this.activateWrapper && this.originalActivate) this.raw.activateBlock = this.originalActivate
     this.originalActivate = null; this.activateWrapper = null; this.blockedDoors.clear()
@@ -184,6 +203,8 @@ export class SurvivalSkills {
       settings: { ...this.settings }, paused: this.paused,
       lastResult: this.lastResult, pathfinding: 'A* / 5ms search slices',
       waitingForCancelledAction: Boolean(this.quarantine),
+      recovery: this.bodyRecovery ?? (this.quarantine ? { state: 'settling', action: this.quarantine.label, waitingMs: Date.now() - this.quarantine.waitingSince } : null),
+      navigation: this.pathBudget?.snapshot() ?? null,
       goal: this.goals.view(), metrics: { ...this.metrics, decisionMsP95: samples.length ? samples[Math.ceil(samples.length * 0.95) - 1] : null },
     }
   }
@@ -276,10 +297,30 @@ export class SurvivalSkills {
       }
       const outstanding = [...this.pendingCalls].filter(c => c.body === b && !c.settled)
       if ((!settled || outstanding.length) && this.raw === b) {
+        operation.waitingSince = Date.now()
         this.quarantine = operation
+        this.recoveryTimer = setTimeout(() => {
+          if (this.quarantine !== operation || this.raw !== b || !this.host.online) return
+          const reason = `「${label}」取消后底层操作超过 5 秒仍未结束，需回收旧游戏身体`
+          this.bodyRecovery = { state: 'reconnectRequired', action: label, reason, at: Date.now() }
+          this.pathBudget?.cancel()
+          this.release(b, true)
+          this.host.log('游戏身体恢复：', reason)
+          this.host.emit('system', { text: reason })
+          if (typeof b.quit === 'function' && typeof b._client?.end === 'function' && typeof this.host.recoverBody === 'function') {
+            this.bodyRecovery.state = 'reconnecting'
+            void this.host.recoverBody(reason, b).catch(error => {
+              if (this.raw === b) this.bodyRecovery = { state: 'reconnectRequired', action: label, reason: error.message, at: Date.now() }
+              this.host.log('游戏身体恢复失败：', error.message)
+            })
+          }
+        }, 5000)
+        this.recoveryTimer.unref?.()
         void Promise.allSettled([task, ...outstanding.map(c => c.promise)]).then(() => {
           if (this.quarantine === operation && this.raw === b) {
+            clearTimeout(this.recoveryTimer); this.recoveryTimer = null
             this.quarantine = null
+            this.bodyRecovery = null
             this.release(b, true)
             this.restoreFollow()
           }

@@ -59,6 +59,8 @@ interface PathUpdateResult {
   status: string;
   cost: number;
   path: MoveNode[];
+  reason?: string;
+  budgetExceeded?: boolean;
 }
 
 export interface PathfindProgressSnapshot {
@@ -164,6 +166,8 @@ export function patchedGoto(
       bot.removeListener('path_update', onPathUpdate);
       bot.removeListener('goal_updated', onGoalUpdated);
       bot.removeListener('path_stop', onPathStop);
+      bot.removeListener('end', onEnd);
+      bot.removeListener('respawn', onEnd);
       options.signal?.removeEventListener('abort', onAbort);
     }
 
@@ -182,19 +186,40 @@ export function patchedGoto(
       }, currentTimeoutMs);
     }
 
-    function onGoalReached(): void {
+    function stopOwnedGoal(): void {
+      // A path_update listener runs before upstream assigns its computed path.
+      // Clear again after that stack, without cancelling a newer goal.
+      queueMicrotask(() => {
+        try {
+          if (bot.pathfinder.goal == null || bot.pathfinder.goal === goal) bot.pathfinder.setGoal(null);
+        } catch {}
+      });
+    }
+
+    function onGoalReached(reachedGoal?: any): void {
+      if (reachedGoal && reachedGoal !== goal) return;
+      let reached = true;
+      try { if (typeof goal?.isEnd === 'function') reached = goal.isEnd(bot.entity.position.floored()); }
+      catch { reached = false; }
+      if (!reached) {
+        settle(buildResult(false, 'noPath', 'Navigation ended but the actual position has not reached the goal'));
+        stopOwnedGoal();
+        return;
+      }
       settle(buildResult(true, 'success', 'Reached the goal'));
     }
 
     function onPathUpdate(results: PathUpdateResult): void {
+      if (results.status === 'noPath' || results.status === 'timeout' || results.budgetExceeded) {
+        settle(buildResult(false, 'noPath', results.reason ?? 'Pathfinding could not find a complete path within its search budget'));
+        stopOwnedGoal();
+        return;
+      }
       if (results.path?.length > 0) {
         currentEstimatedMs = estimatePathTimeMs(results.path);
         currentTimeoutMs = computeTimeoutFromEta(currentEstimatedMs);
         currentPathCost = results.cost;
         resetTimeout();
-      }
-      if (results.path?.length === 0 && (results.status === 'noPath' || results.status === 'timeout')) {
-        settle(buildResult(false, 'noPath', 'Pathfinding could not find a path'));
       }
     }
 
@@ -209,6 +234,11 @@ export function patchedGoto(
     function onAbort(): void {
       settle(buildResult(false, 'interrupted', 'Navigation was cancelled'));
       try { bot.pathfinder.setGoal(null); } catch {}
+    }
+
+    function onEnd(): void {
+      settle(buildResult(false, 'interrupted', 'The game body disconnected or changed dimension'));
+      stopOwnedGoal();
     }
 
     function checkProgress(): void {
@@ -246,6 +276,8 @@ export function patchedGoto(
     bot.on('path_update', onPathUpdate);
     bot.on('goal_updated', onGoalUpdated);
     bot.on('path_stop', onPathStop);
+    bot.on('end', onEnd);
+    bot.on('respawn', onEnd);
     options.signal?.addEventListener('abort', onAbort, { once: true });
     if (options.signal?.aborted) return onAbort();
     progressTimer = setInterval(checkProgress, PROGRESS_INTERVAL_MS);

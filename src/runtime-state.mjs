@@ -10,6 +10,8 @@ export function runtimeState(host, { commandsEnabled = false } = {}) {
     .sort((a,b)=>a.distance-b.distance).slice(0,4)
   return { observedAt:Date.now(), online:true, position:state.position, players, follow:state.follow,
     active:state.active, lastAction:state.lastResult,
+    waitingForCancelledAction:state.waitingForCancelledAction, recovery:state.recovery,
+    navigation:state.navigation ? { memoryPressure:state.navigation.memoryPressure, hostHeapMB:state.navigation.hostHeapMB, last:state.navigation.last } : null,
     goal:state.goal ? {id:state.goal.id,kind:state.goal.kind,item:state.goal.item,state:state.goal.state,phase:state.goal.phase,progress:state.goal.progress,deadline:state.goal.deadline,error:state.goal.error} : null,
     observation: observed ? { revision: observed.revision, connectionEpoch: observed.connectionEpoch, inventory: observed.inventory.counts,
       threats: observed.threats.slice(0, 4), landmarks: Object.fromEntries(Object.entries(observed.landmarks).map(([key, items]) => [key, items.slice(0, 4)])), scope: observed.scope } : null,

@@ -822,6 +822,37 @@ export class McBot extends EventEmitter {
     }, this.reconnectDelay).unref?.()
   }
 
+  /** Retire only a hung game connection. The existing end/reconnect lifecycle
+   * reuses the same server/account; never restart or kill the desktop host. */
+  async recoverBody(reason, expectedBody = this.bot) {
+    const b = this.bot
+    if (!b || b !== expectedBody) return { outcome: 'superseded' }
+    if (this.stopped || !this.autoReconnect) throw new Error('自动重连已关闭；旧动作不能安全释放，请重新连接 Minecraft')
+    const now = Date.now()
+    this._bodyRecoveryTimes = (this._bodyRecoveryTimes ?? []).filter(at => now - at < 60000)
+    if (this._bodyRecoveryTimes.length >= 2) throw new Error('一分钟内已恢复两次连接，停止重复重连；请检查服务器和具体失败动作')
+    this._bodyRecoveryTimes.push(now)
+    this.log('回收卡住的游戏连接：', String(reason).slice(0, 400))
+    return new Promise((resolve, reject) => {
+      let grace, deadline, settled = false
+      const finish = error => {
+        if (settled) return
+        settled = true; clearTimeout(grace); clearTimeout(deadline); b.off('end', ended)
+        error ? reject(error) : resolve({ outcome: 'reconnecting', retired: true })
+      }
+      const ended = () => finish()
+      b.once('end', ended)
+      grace = setTimeout(() => {
+        if (this.bot !== b || this.stopped) return finish(new Error('恢复期间游戏连接已由用户改变'))
+        try { b._client.end('whale_craft: retire stalled action') }
+        catch (error) { finish(error) }
+      }, 1000)
+      deadline = setTimeout(() => finish(new Error('旧游戏连接没有确认关闭，请手动重新连接；未放行重叠动作')), 3000)
+      try { b.quit('whale_craft: recover stalled action') }
+      catch { try { b._client.end('whale_craft: recover stalled action') } catch (error) { finish(error) } }
+    })
+  }
+
   /**
    * 下线。**先优雅退出，真走不掉才强断**（用户 2026-09-16 要求："一定要先尝试退出游戏"）。
    *

@@ -4,6 +4,7 @@ import { EventEmitter } from 'node:events'
 import { createRequire } from 'node:module'
 import { PlayerMovements, PlayerFollowGoal, PlayerNearGoal, playerInReach, setDoorState, blockIsOpen } from '../src/player-navigation.mjs'
 import { attachDoorwayNavigation, correctDoorwayPath, doorwayRevision, enterRoom, shouldResumeBlockedFollow } from '../src/doorway-navigation.mjs'
+import { attachPathfinderBudget } from '../src/pathfinder-budget.mjs'
 
 const require = createRequire(import.meta.url), mfRequire = createRequire(require.resolve('mineflayer'))
 const registry = mfRequire('prismarine-registry')('1.21.11')
@@ -14,7 +15,7 @@ const flush = () => new Promise(resolve => setImmediate(resolve))
 const wait = ms => new Promise(resolve => setTimeout(resolve, ms))
 const controls = () => ({ forward: false, back: false, left: false, right: false, jump: false, sprint: false, sneak: false })
 
-function worldFixture({ open = false, facing = 'east', hinge = 'left', iron = false, rejected = false, assist = true } = {}) {
+function worldFixture({ open = false, facing = 'east', hinge = 'left', iron = false, rejected = false, assist = true, boundedSearch = false } = {}) {
   const rotate = p => facing === 'north' || facing === 'south' ? new Vec3(p.z, p.y, p.x) : p
   const bot = new EventEmitter(), states = new Map(), door = rotate(new Vec3(2, 64, 0))
   const put = (name, p, properties) => {
@@ -68,7 +69,9 @@ function worldFixture({ open = false, facing = 'east', hinge = 'left', iron = fa
   bot.on('path_update', result => { bot.lastPath = result })
   const originalActivate = bot.activateBlock
   bot.activateBlock = b => setDoorState(bot, b, true, { activate: originalActivate, timeoutMs: 25 })
-  const detach = assist ? attachDoorwayNavigation(bot) : () => {}
+  const budget = boundedSearch ? attachPathfinderBudget(bot) : null
+  const detachDoorway = assist ? attachDoorwayNavigation(bot) : () => {}
+  const detach = () => { detachDoorway(); budget?.detach() }
   const target = { position: rotate(new Vec3(4.5, 64, 0.5)), height: 1.8 }
   bot.players.Tester = { entity: target }
   async function tick() {
@@ -95,6 +98,16 @@ test('real upstream path elevates an open door onto its collision panel; correct
   const doorNode = result.path.find(p => Math.floor(p.x) === 2 && Math.floor(p.z) === 0)
   assert.deepEqual([doorNode.x, doorNode.y, doorNode.z], [2.5, 64, 0.5])
   assert.ok(f.bot.blockAt(f.door).shapes.length, 'path correction must not erase actual physics collision')
+})
+
+test('bounded native search composes with doorway correction and physically enters a closed-door room', async () => {
+  const f = worldFixture({ boundedSearch: true })
+  try {
+    f.bot.pathfinder.setGoal(new PlayerNearGoal(f.bot, f.target.position, 1))
+    assert.equal(await f.drive(() => !f.bot.pathfinder.goal), true)
+    assert.ok(f.bot.entity.position.x >= 3.2)
+    assert.equal(playerInReach(f.bot, f.target, 1.75), true)
+  } finally { f.detach() }
 })
 
 for (const [open, hinge, facing] of [[true, 'left', 'east'], [false, 'left', 'east'], [false, 'right', 'east'], [false, 'left', 'west'], [false, 'left', 'north'], [false, 'right', 'south']]) {

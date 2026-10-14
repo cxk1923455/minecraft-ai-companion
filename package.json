@@ -1,6 +1,6 @@
 {
   "name": "whale_craft",
-  "version": "0.2.0-beta.2.hiyori.7",
+  "version": "0.2.0-beta.2.hiyori.8",
   "description": "让 DSH 加入 Minecraft 服务器游玩：有自己的游戏角色，能探索、建造、聊天。",
   "keywords": [
     "dsh",
@@ -50,6 +50,7 @@
     "PLAYER-CAPABILITIES.md",
     "OBSERVATION-DESIGN.md",
     "OPTIMIZATION-V7.md",
+    "CRASH-RECOVERY-V8.md",
     "README.md",
     "CHANGELOG.md",
     "THIRD_PARTY_NOTICES.md"
@@ -105,6 +106,7 @@
   "scripts": {
     "check": "node tools/check-core.mjs && node selfcheck.mjs && node --test test/*.test.mjs",
     "test:survival": "node --test test/*.test.mjs",
+    "test:memory": "node --max-old-space-size=128 --expose-gc tools/stress-pathfinder.mjs",
     "build:hiyori": "node tools/build-hiyori.mjs",
     "dev:web": "node tools/dev.mjs web",
     "dev:desktop": "node tools/dev.mjs desktop",

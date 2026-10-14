@@ -119,6 +119,7 @@ export class TaskGoals {
     while (job.state === 'paused' || this.skills.pendingReflex || this.skills.busy || this.skills.quarantine) {
       job.controller.signal.throwIfAborted()
       if (!this.skills.host.online) throw new Error('服务器连接已经结束')
+      if (this.skills.bodyRecovery?.state === 'reconnectRequired') throw new Error(this.skills.bodyRecovery.reason ?? '旧动作无法结束，需要重新连接游戏身体')
       await pause(50)
     }
     job.controller.signal.throwIfAborted()

@@ -39,6 +39,15 @@ export function chooseConcreteResource(bot, item) {
   return nearest?.name ?? (bot.registry.itemsByName.oak_log ? 'oak_log' : 'log')
 }
 
+/** A normal gather goal counts the drop, not the block it mines. Keep the
+ * explicit mc_goal/mc_collect item APIs for Silk Touch/raw-block requests. */
+export function gatheredResource(bot, item) {
+  const name = itemName(item), base = name.replace(/^deepslate_/, '')
+  const drop = { diamond_ore: 'diamond', coal_ore: 'coal', iron_ore: 'raw_iron', gold_ore: 'raw_gold', copper_ore: 'raw_copper',
+    redstone_ore: 'redstone', lapis_ore: 'lapis_lazuli', stone: 'cobblestone', deepslate: 'cobbled_deepslate' }[base]
+  return drop && bot.registry.itemsByName[drop] ? drop : name
+}
+
 /** High-level task admission, inventory-first planning, evidence and a bounded decision history. */
 export class AgentController {
   constructor(skills) { this.skills = skills; this.history = [] }
@@ -48,7 +57,8 @@ export class AgentController {
     return { architecture: 'observe → prepare → execute → verify → recover', online: this.skills.host.online,
       task: goal, body: this.skills.active?.label ?? null, health: bot?.health ?? null, food: bot?.food ?? null,
       position: bot?.entity?.position ? { x: Math.floor(bot.entity.position.x), y: Math.floor(bot.entity.position.y), z: Math.floor(bot.entity.position.z) } : null,
-      decisions: [...this.history], note: '后台目标继续执行；status 只是观察，不会重新扫描或重启同一个目标。' }
+      recovery: this.skills.status?.().recovery ?? null,
+      decisions: [...this.history], note: '以 task/body/recovery 的实际状态判断是否运行；status 只是观察，不会重新扫描或重启同一个目标。' }
   }
   act(args = {}) {
     const action = args.action ?? 'status'
@@ -57,6 +67,8 @@ export class AgentController {
     if (['resume', 'continue', 'recover'].includes(action)) {
       const goals = this.skills.goals, job = goals.job
       if (!job) throw new Error('没有可继续的原目标，请先说明要完成的任务')
+      if (this.skills.quarantine) return { outcome: 'recovering', reused: true, task: goals.view(), recovery: this.skills.status().recovery,
+        note: '旧底层动作尚未退出，正在结算或恢复连接；没有恢复执行，不能声称已经重新开始。' }
       if (!goals.running && !['paused', 'blocked', 'failed'].includes(job.state)) throw new Error(`原目标 ${job.state ?? '已结束'}，没有可恢复的任务；取消或成功的目标不能擅自重启`)
       this.skills.follow = null
       if (this.skills.followState) this.skills.followState.phase = 'inactive'
@@ -74,7 +86,8 @@ export class AgentController {
     if (kind === 'follow') { const result = this.skills.setFollow(args.who); this.record({ action: 'follow', who: args.who }); return result }
     if (!['gather', 'craft', 'build', 'explore', 'enter'].includes(kind)) throw new Error('kind 为 gather/craft/build/explore/enter/follow')
     const requestedItem = itemName(args.item ?? '')
-    const item = kind === 'gather' && requestedItem === 'log' ? 'log' : chooseConcreteResource(bot, requestedItem)
+    const gathered = kind === 'gather' ? gatheredResource(bot, requestedItem) : requestedItem
+    const item = kind === 'gather' && gathered === 'log' ? 'log' : chooseConcreteResource(bot, gathered)
     const spec = { ...args, kind: kind === 'gather' ? 'collect' : kind, item,
       budgetMs: integer(args.budgetMs, kind === 'gather' && ['diamond', 'raw_gold', 'redstone', 'lapis_lazuli'].includes(item) ? 1800000 : 600000, 1000, 1800000, 'budgetMs'),
       radius: integer(args.radius, 32, 4, 128, 'radius'),
