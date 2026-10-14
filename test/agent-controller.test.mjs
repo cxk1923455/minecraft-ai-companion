@@ -23,6 +23,11 @@ test('room entry and task pause/resume are distinct from ordinary nearby movemen
   assert.equal(localChatIntent('取消任务'), 'halt')
   assert.equal(localChatIntent('别进来'), null)
 })
+test('independent-search and continuation requests keep an existing objective distinct from stop', () => {
+  for (const text of ['你自己去找', '自己找', '你去自己找', '别跟着我去完成任务', '别跟着我，去完成原来的任务']) assert.equal(localChatIntent(text), 'continue', text)
+  for (const text of ['继续挖', '快点继续', '继续去找']) assert.equal(localChatIntent(text), 'resume', text)
+  for (const text of ['不要继续', '如果让你自己去找', '他说“你自己去找”']) assert.equal(localChatIntent(text), null, text)
+})
 function controllerFixture() {
   const raw = { health: 20, food: 20, registry: { blocksArray: [], itemsByName: { diamond: {} } }, entity: { position: { x: 0, y: 64, z: 0 } } }
   let startCount = 0
@@ -51,6 +56,46 @@ test('pause/resume keep the admitted objective and cancelling stops its body', (
   assert.equal(f.goals.job, original)
   assert.equal(f.director.act({ action: 'cancel' }).stopped, true)
 })
+test('continue recovers a blocked task with the same objective and never halts its body', () => {
+  const f = controllerFixture()
+  f.director.act({ action: 'start', kind: 'gather', item: 'diamond', count: 1 })
+  const original = f.goals.job
+  Object.assign(original, { id: 'same-job', state: 'blocked', progress: { mined: 17, visited: 4 } })
+  f.goals.running = false
+  let retries = 0
+  f.goals.retry = args => { retries++; assert.equal(args.budgetMs, 300000); original.state = 'running'; f.goals.running = true; return original }
+  f.skills.follow = 'Player'; f.skills.followState = { phase: 'following' }
+  f.skills.halt = () => { throw new Error('continuation must not cancel the admitted task') }
+  const resumed = f.director.act({ action: 'continue', budgetMs: 300000 })
+  assert.equal(resumed.task, original); assert.equal(resumed.task.id, 'same-job')
+  assert.equal(resumed.task.progress.mined, 17); assert.equal(retries, 1)
+  assert.equal(f.skills.follow, null); assert.equal(f.skills.followState.phase, 'inactive')
+  assert.equal(f.startCount(), 1)
+})
+test('continue while a task runs observes the same body without cancelling or resetting it', () => {
+  const f = controllerFixture()
+  f.director.act({ action: 'start', kind: 'gather', item: 'diamond' })
+  f.skills.busy = true; f.skills.follow = 'Player'
+  f.skills.release = () => { throw new Error('cannot release a running body') }
+  const result = f.director.act({ action: 'continue' })
+  assert.equal(result.reused, true); assert.equal(result.task, f.goals.job)
+  assert.equal(f.startCount(), 1); assert.equal(f.skills.follow, null)
+})
+test('repeating a paused objective resumes it rather than reporting a still-paused task as active', () => {
+  const f = controllerFixture()
+  f.director.act({ action: 'start', kind: 'gather', item: 'diamond' })
+  f.director.act({ action: 'pause' })
+  const resumed = f.director.act({ action: 'start', kind: 'gather', item: 'diamond' })
+  assert.equal(resumed.task.state, 'running'); assert.equal(resumed.reused, true)
+  assert.equal(f.startCount(), 1)
+})
+test('cancelled or completed objectives are not silently restarted by an ambiguous continuation', () => {
+  const f = controllerFixture()
+  f.director.act({ action: 'start', kind: 'gather', item: 'diamond' })
+  f.goals.running = false; f.goals.job.state = 'cancelled'; f.skills.follow = 'Player'
+  assert.throws(() => f.director.act({ action: 'continue' }), /不能擅自重启/)
+  assert.equal(f.startCount(), 1); assert.equal(f.skills.follow, 'Player')
+})
 test('changing fresh-mining policy or search radius is not mistaken for the current objective', () => {
   const f = controllerFixture()
   f.director.act({ action: 'start', kind: 'gather', item: 'diamond' })
@@ -64,6 +109,12 @@ test('a namespaced diamond identifier receives the same deep-mining budget', () 
   const result = f.director.act({ action: 'start', kind: 'gather', item: 'minecraft:diamond' })
   assert.equal(result.task.item, 'diamond')
   assert.equal(result.task.budgetMs, 1800000)
+})
+test('generic gathering wood remains a material family instead of locking exploration to oak', () => {
+  const f = controllerFixture()
+  const result = f.director.act({ action: 'start', kind: 'gather', item: 'minecraft:log', count: 4 })
+  assert.equal(result.task.item, 'log')
+  assert.equal(result.task.count, 4)
 })
 function localFixture() {
   const raw = { username: 'Bot', players: { Player: { entity: { position: { x: 1, y: 64, z: 0 } } } }, entity: { position: { x: 0, y: 64, z: 0 } } }

@@ -1,6 +1,8 @@
 # Whale Craft 的 Hiyori Minecraft 功能移植
 
-本地增强版：`0.2.0-beta.2.hiyori.6`，基于你提供的 `whale_craft-0.2.0-beta.2.zip`。
+本地增强版：`0.2.0-beta.2.hiyori.7`，基于你提供的 `whale_craft-0.2.0-beta.2.zip`。
+
+本轮整体优化、理由、收益和替代方案见 [OPTIMIZATION-V7.md](OPTIMIZATION-V7.md)。新增 mc_observe 结构化观测；mc_agent/mc_goal 支持 continue/recover，地图新增 format=json/svg，原有参数仍兼容。
 
 保留 DSH 原生插件、每会话一个机器人、连接界面、离线/皮肤站账号、看门狗、记忆和原有建造工具。
 新技能使用当前会话已有的 Mineflayer 实例；不需要 Hiyori 桌面程序、Electron、语音服务或额外模型 API。

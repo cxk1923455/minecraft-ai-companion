@@ -2,10 +2,11 @@ import { randomUUID } from 'node:crypto'
 import vec3pkg from 'vec3'
 import { ResourceExpedition } from './resource-expedition.mjs'
 import { playerInReach } from './player-navigation.mjs'
+import { acceptsAnyWood, materialCount, materialForDelivery } from './material-supply.mjs'
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 const vec = p => new Vec3(p.x, p.y, p.z)
 
-const countItem = (bot, name) => (bot.inventory?.items?.() ?? []).filter(item => item.name === name).reduce((sum, item) => sum + item.count, 0)
+const countItem = materialCount
 const TOOL_FOR = { cobblestone: 'wooden_pickaxe', cobbled_deepslate: 'wooden_pickaxe', blackstone: 'wooden_pickaxe', coal: 'wooden_pickaxe', raw_iron: 'stone_pickaxe', raw_copper: 'stone_pickaxe', raw_gold: 'iron_pickaxe', diamond: 'iron_pickaxe', redstone: 'iron_pickaxe', lapis_lazuli: 'stone_pickaxe' }
 const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 
@@ -13,14 +14,15 @@ const pause = ms => new Promise(resolve => setTimeout(resolve, ms))
 export class TaskGoals {
   constructor(skills) { this.skills = skills; this.job = null; this.executing = false; this.explored = new Set(); this.expedition = new ResourceExpedition(skills, this) }
   get running() { return this.executing }
+  get pending() { return Boolean(this.job && ['running', 'paused', 'blocked', 'failed', 'recovering'].includes(this.job.state)) }
   owns(signal) { return this.executing && signal === this.job?.controller.signal }
   view() {
     if (!this.job) return null
-    const { id, kind, item, count, state, phase, startedAt, finishedAt, result, error, progress, plan, deadline, who, deliverTo } = this.job
-    return { id, kind, item, count, state, phase, who, deliverTo, plan, startedAt, deadline, finishedAt: finishedAt ?? null, result: result ?? null, error: error ?? null, progress: { ...progress } }
+    const { id, kind, item, count, state, phase, startedAt, finishedAt, result, error, progress, plan, deadline, who, deliverTo, requestedBy, retries } = this.job
+    return { id, kind, item, count, state, phase, who, deliverTo, requestedBy, retries: retries ?? 0, plan, startedAt, deadline, finishedAt: finishedAt ?? null, result: result ?? null, error: error ?? null, progress: { ...progress } }
   }
   cancel(reason = '用户取消目标') {
-    if (this.executing) { this.job.state = 'cancelled'; this.job.controller.abort(reason) }
+    if (this.pending) { this.job.state = 'cancelled'; this.job.controller.abort(reason) }
     return this.view()
   }
   suspend() {
@@ -47,7 +49,7 @@ export class TaskGoals {
     if (!Number.isInteger(budget) || budget < 1000 || budget > 1800000) throw new Error('budgetMs 必须为 1000–1800000')
     const radius = args.radius ?? 32
     if (!Number.isInteger(radius) || radius < 4 || radius > 128) throw new Error('radius 必须为 4–128')
-    if (['craft', 'collect'].includes(kind) && !bot.registry.itemsByName[item]) throw new Error('需要当前游戏版本有效的目标物品 item')
+    if (['craft', 'collect'].includes(kind) && !bot.registry.itemsByName[item] && !(kind === 'collect' && item === 'log')) throw new Error('需要当前游戏版本有效的目标物品 item')
     if (kind === 'explore' && count > 16) throw new Error('一次探索最多 16 个落脚点')
     const who = args.who === undefined ? null : String(args.who).trim()
     if (kind === 'enter' && !who && !['x', 'y', 'z'].every(key => Number.isFinite(args[key]))) throw new Error('进入房间需要 who 或完整 x/y/z 目标')
@@ -72,12 +74,30 @@ export class TaskGoals {
     const plan = kind === 'collect' ? ['检查库存', '准备工具与补给', '寻找资源/探索/安全下矿', '采集并验证', ...(deliverTo ? ['接近玩家并交接'] : [])]
       : kind === 'enter' ? ['识别门与门内落脚点', '开门并穿过', '确认在目标一侧'] : ['观察材料与地形', '准备', '执行', '验证']
     const job = { id: randomUUID(), kind, item, count, radius, blocks, deliverTo, who, target: { x: args.x, y: args.y, z: args.z }, useExisting: args.useExisting === true,
-      origin: bot.entity.position.clone(),
+      origin: bot.entity.position.clone(), body: bot, dimension: bot.game?.dimension, requestedBy: args.requestedBy ?? null, budgetMs: budget, retries: 0,
       plan, deadline: startedAt + budget, controller, state: 'running', phase: 'planning', startedAt, progress: { completed: 0, total: kind === 'build' ? blocks.length : count } }
     this.job = job
+    this.launch(job, budget)
+    return this.view()
+  }
+  retry(args = {}) {
+    const job = this.job
+    if (!job || !['blocked', 'failed'].includes(job.state) || this.executing) throw new Error('没有可继续的受阻目标')
+    if (this.skills.busy || this.skills.quarantine) throw new Error('旧身体动作还在结算，请稍后继续')
+    if (job.body !== this.skills.bot || job.dimension !== this.skills.bot.game?.dimension) throw new Error('旧目标属于不同身体或维度，需重新明确目标')
+    const budget = args.budgetMs ?? job.budgetMs ?? 600000
+    if (!Number.isInteger(budget) || budget < 1000 || budget > 1800000) throw new Error('budgetMs 必须为 1000–1800000')
+    job.retries++; job.previousError = job.error; job.error = null; job.result = null; job.finishedAt = null
+    job.controller = new AbortController(); job.state = 'running'; job.phase = 'recovering'; job.deadline = Date.now() + budget
+    this.expedition.resetFailures(job)
+    this.launch(job, budget)
+    return { ...this.view(), reused: true }
+  }
+  launch(job, budget) {
     this.executing = true
     this.skills.paused = false
     this.skills.release()
+    const controller = job.controller
     const timer = setTimeout(() => { job.error = '目标时间预算耗尽'; controller.abort(job.error) }, budget)
     job.done = this.execute(job).then(result => {
       job.result = result; job.state = controller.signal.aborted ? (job.error ? 'failed' : 'cancelled') : result.outcome === 'succeeded' ? 'succeeded' : 'blocked'
@@ -88,12 +108,12 @@ export class TaskGoals {
       clearTimeout(timer)
       job.finishedAt = Date.now()
       this.executing = false
-      this.skills.restoreFollow()
+      if (this.pending) { this.skills.release(); if (this.skills.followState) this.skills.followState.phase = 'task-blocked' }
+      else this.skills.restoreFollow()
       this.skills.host.emit('goalResult', { id: job.id, kind: job.kind, item: job.item, count: job.count, who: job.who, deliverTo: job.deliverTo, state: job.state, phase: job.phase,
         progress: { ...job.progress }, result: job.result ?? null, error: job.error ?? null })
       this.skills.host.emit('system', { text: `DeepSeek 游戏目标 ${job.kind}：${job.state}${job.error ? `，${job.error}` : ''}。可用 mc_goal 查看结果。` })
     })
-    return this.view()
   }
   async ready(job) {
     while (job.state === 'paused' || this.skills.pendingReflex || this.skills.busy || this.skills.quarantine) {
@@ -158,6 +178,12 @@ export class TaskGoals {
         if (countItem(bot, item) < total) throw new Error(`${item} 尚未取得：${result.reason ?? '探索或采矿预算耗尽'}`)
       } else {
         for (const [resource, amount] of Object.entries(plan.missing)) {
+          if (resource === 'log' && acceptsAnyWood(item)) {
+            await this.ensure(job, 'log', countItem(bot, 'log') + amount, chain)
+            // Recompute concrete plank recipes from the species actually found.
+            // A birch forest must not leave a generic pickaxe waiting for oak.
+            break
+          }
           // Hiyori normalizes wood shortages into material families. Resolve
           // those back to the concrete ingredients selected by this plan.
           const concrete = resource === 'log' && !bot.registry.itemsByName.log
@@ -167,6 +193,7 @@ export class TaskGoals {
             : resource
           await this.ensure(job, concrete, countItem(bot, concrete) + amount, chain)
         }
+        if (plan.missing.log && acceptsAnyWood(item)) continue
         if (plan.requiresCraftingTable && !bot.findBlock({ matching: bot.registry.blocksByName.crafting_table?.id, maxDistance: 32 })) {
           await this.ensure(job, 'crafting_table', 1, chain)
           await this.placeStation(job, 'crafting_table')
@@ -194,20 +221,24 @@ export class TaskGoals {
   }
   async execute(job) {
     const bot = this.skills.bot
+    if (job.delivery?.pending) await this.step(job, '核对暂停前的物品交接', signal => this.skills.run('交接恢复验收', signal, (s, b) => this.settleDelivery(job, b, s), 6000))
     if (job.kind === 'collect') {
-      const before = countItem(bot, job.item)
-      const target = job.useExisting ? Math.max(before, job.count) : before + job.count
+      const before = job.collectionStart ??= countItem(bot, job.item)
+      const originalTarget = job.collectionTarget ??= job.useExisting ? Math.max(before, job.count) : before + job.count
+      const alreadyDelivered = job.delivery?.dropped ?? 0
+      const target = Math.max(0, originalTarget - alreadyDelivered)
       const result = await this.expedition.obtain(job, job.item, target)
-      const collected = Math.max(0, countItem(bot, job.item) - before)
-      job.progress.completed = job.useExisting ? Math.min(job.count, countItem(bot, job.item)) : collected
+      const collected = Math.max(0, countItem(bot, job.item) + alreadyDelivered - before)
+      job.progress.completed = job.useExisting ? Math.min(job.count, countItem(bot, job.item) + alreadyDelivered) : collected
       const delivery = job.deliverTo ? await this.deliver(job, Math.min(job.count, job.progress.completed)) : null
       return { ...result, outcome: job.progress.completed >= job.count ? 'succeeded' : 'partial', collected, supplied: job.progress.completed, delivery }
     }
     if (job.kind === 'enter') return this.step(job, '开门进入房间并核验', signal => this.skills.enter({ who: job.who, ...job.target, budgetMs: Math.min(120000, job.deadline - Date.now()) }, signal))
     if (job.kind === 'craft') {
-      const before = countItem(bot, job.item)
-      await this.ensure(job, job.item, before + job.count)
-      job.progress.completed = countItem(bot, job.item) - before
+      const before = job.collectionStart ??= countItem(bot, job.item)
+      const originalTarget = job.collectionTarget ??= before + job.count
+      await this.ensure(job, job.item, originalTarget - (job.delivery?.dropped ?? 0))
+      job.progress.completed = countItem(bot, job.item) + (job.delivery?.dropped ?? 0) - before
       const delivery = job.deliverTo ? await this.deliver(job, job.count) : null
       return { outcome: 'succeeded', item: job.item, produced: job.progress.completed, delivery }
     }
@@ -229,7 +260,9 @@ export class TaskGoals {
           if (bot.blockAt(vec(block))?.name !== block.name) throw new Error('方块未通过世界状态验证')
         }, 45000))
       }
-      job.progress.completed++
+      job.verifiedBlocks ??= new Set()
+      job.verifiedBlocks.add(`${block.x},${block.y},${block.z}`)
+      job.progress.completed = job.verifiedBlocks.size
     }
     return { outcome: 'succeeded', placedOrVerified: job.progress.completed, total: job.blocks.length }
   }
@@ -249,16 +282,9 @@ export class TaskGoals {
     }
     if (!playerInReach(bot, this.skills.findPlayer(job.deliverTo), 3)) throw new Error('交接玩家已离开或被门墙隔开，保留背包物品')
     const delivery = job.delivery ??= { player: job.deliverTo, requested: amount, dropped: 0, pending: null }
+    delivery.requested = Math.min(job.count ?? amount, Math.max(delivery.requested, amount))
     return this.step(job, '物品交接', signal => this.skills.run('物品交接', signal, async (s, b) => {
-      const settle = async () => {
-        if (!delivery.pending) return
-        await this.skills.inventoryBarrier(b, s)
-        const delta = delivery.pending.before - countItem(b, job.item)
-        delivery.pending = null
-        if (delta <= 0) throw new Error('物品投掷未得到库存变化确认')
-        delivery.dropped += Math.min(delta, delivery.requested - delivery.dropped)
-        job.progress.delivery = { player: delivery.player, dropped: delivery.dropped, requested: delivery.requested }
-      }
+      const settle = () => this.settleDelivery(job, b, s)
       // A paused toss can settle while the body is quarantined. Verify it before
       // sending another stack so resuming never repeats an already sent amount.
       await settle()
@@ -267,41 +293,33 @@ export class TaskGoals {
         if (!playerInReach(b, this.skills.findPlayer(job.deliverTo), 3)) throw new Error('交接玩家已移动或被门墙隔开，保留未交出的物品')
         const remaining = delivery.requested - delivery.dropped
         if (countItem(b, job.item) < remaining) throw new Error('尚未交接的物品不足，已投出数量可在进度中查看')
-        delivery.pending = { before: countItem(b, job.item) }
-        await this.skills.guarded(this.skills.host.tossItem({ name: job.item, count: remaining }), s, 10000)
+        const name = materialForDelivery(b, job.item), stack = b.inventory.items().find(item => item.name === name)
+        const sent = Math.min(remaining, stack?.count ?? remaining)
+        delivery.pending = { before: countItem(b, job.item), name, maxSent: sent }
+        await this.skills.guarded(this.skills.host.tossItem({ name, count: sent }), s, 10000)
         await settle()
       }
       return { player: job.deliverTo, dropped: delivery.dropped, note: '已在玩家附近投出；不等同于已确认玩家拾取' }
     }, 45000))
   }
+  async settleDelivery(job, bot, signal) {
+    const delivery = job.delivery
+    if (!delivery?.pending) return
+    await this.skills.inventoryBarrier(bot, signal)
+    const delta = Math.min(delivery.pending.maxSent ?? Infinity, delivery.pending.before - countItem(bot, job.item))
+    delivery.pending = null
+    if (delta <= 0) throw new Error('物品投掷未得到库存变化确认')
+    delivery.dropped += Math.min(delta, delivery.requested - delivery.dropped)
+    job.progress.delivery = { player: delivery.player, dropped: delivery.dropped, requested: delivery.requested }
+  }
   async explore(job) {
-    const bot = this.skills.bot
-    const visited = []
-    for (let step = 0; step < job.count; step++) {
+    const visited = job.visited ??= []
+    for (let step = job.progress.completed; step < job.count; step++) {
       await this.ready(job)
-      const origin = bot.entity.position.floored()
-      let reached = false
-      const directionOffset = this.explored.size
-      for (let direction = 0; direction < 8 && !reached; direction++) {
-        const angle = ((direction + directionOffset) % 8) * Math.PI / 4
-        const distance = Math.min(job.radius, 12)
-        const x = Math.floor(origin.x + Math.cos(angle) * distance), z = Math.floor(origin.z + Math.sin(angle) * distance)
-        const key = `${JSON.stringify(this.skills.host.connectionView())}:${bot.game?.dimension}:${Math.floor(x / 4)},${Math.floor(z / 4)}`
-        if (this.explored.has(key)) continue
-        let target
-        for (const dy of [0, -1, 1, -2, 2]) {
-          const p = new Vec3(x, origin.y + dy, z), floor = bot.blockAt(p.offset(0, -1, 0)), feet = bot.blockAt(p), head = bot.blockAt(p.offset(0, 1, 0))
-          if (floor?.boundingBox === 'block' && !/magma|lava|fire|cactus/.test(floor.name) && feet?.boundingBox === 'empty' && head?.boundingBox === 'empty'
-            && !/lava|water|fire/.test(`${feet.name} ${head.name}`)) { target = p; break }
-        }
-        if (!target) continue
-        this.explored.add(key)
-        if (this.explored.size > 256) this.explored.delete(this.explored.values().next().value)
-        const result = await this.step(job, `探索 ${step + 1}/${job.count}`, signal => this.skills.navigate(target, signal))
-        if (result.ok) { reached = true; visited.push({ x: target.x, y: target.y, z: target.z }); job.progress.completed++ }
-      }
-      if (!reached) return { outcome: 'partial', visited, reason: '附近没有新的已加载安全落脚点或路径不可达，请重新观察' }
+      const result = await this.expedition.terrain.advance(job, { purpose: 'resource' })
+      if (!result.moved) return { outcome: 'partial', visited, reason: result.reason, recoverable: true }
+      visited.push(result.position); job.progress.completed++
     }
-    return { outcome: 'succeeded', visited, dimension: bot.game?.dimension ?? null }
+    return { outcome: 'succeeded', visited, dimension: this.skills.bot.game?.dimension ?? null }
   }
 }

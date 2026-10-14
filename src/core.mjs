@@ -1365,36 +1365,48 @@ export class McBot extends EventEmitter {
   /** 俯视地形：返回 { names（二维字符数组）, legend, center, unloaded } */
   heightmap ({ radius = 32, yTop = 10, yBottom = -24 } = {}) {
     const b = this.requireBot()
-    const R = Math.min(Math.max(radius, 4), 96)
+    if (![radius, yTop, yBottom].every(value => Number.isFinite(Number(value)))) throw new Error('地图半径与高度必须是有限数字')
+    const R = Math.min(Math.max(Math.floor(Number(radius)), 4), 96)
     const cx = Math.floor(b.entity.position.x)
     const cz = Math.floor(b.entity.position.z)
     const cy = Math.floor(b.entity.position.y)
+    const bottom = Number.isFinite(b.game?.minY) ? b.game.minY : -64
+    const top = bottom + (Number.isFinite(b.game?.height) ? b.game.height : 384) - 1
+    const firstY = Math.min(top, cy + Math.min(384, Math.max(-384, Math.floor(Number(yTop)))))
+    const lastY = Math.max(bottom, cy + Math.min(384, Math.max(-384, Math.floor(Number(yBottom)))))
+    if (firstY < lastY) throw new Error('地图搜索上界必须大于等于下界')
     const names = []
+    const heights = []
     const legend = new Map()
     let unloaded = 0
     for (let dz = -R; dz < R; dz++) {
       const row = []
+      const ys = []
       for (let dx = -R; dx < R; dx++) {
         let nm = null
-        for (let y = cy + yTop; y >= cy + yBottom; y--) {
+        let surface = null
+        for (let y = firstY; y >= lastY; y--) {
           const blk = b.blockAt(new Vec3(cx + dx, y, cz + dz))
           if (!blk) { nm = null; break }
-          if (!isAir(blk.name)) { nm = blk.name; break }
+          if (!isAir(blk.name)) { nm = blk.name; surface = y; break }
         }
         if (nm === null) unloaded++
         legend.set(nm ?? 'unloaded', (legend.get(nm ?? 'unloaded') ?? 0) + 1)
         row.push(nm)
+        ys.push(surface)
       }
       names.push(row)
+      heights.push(ys)
     }
     return {
-      center: { x: cx, y: cy, z: cz }, radius: R, unloaded, names, colors: names.map((row) => row.map(colorOf)),
+      center: { x: cx, y: cy, z: cz }, radius: R, unloaded, names, heights, colors: names.map((row) => row.map(colorOf)),
       legend: [...legend.entries()].sort((a, b2) => b2[1] - a[1]).map(([name, count]) => ({ name, count })),
     }
   }
 
   /** 字符地形图（无视觉也能读） */
   static glyphMap (names, step = 2, selfIndex = null) {
+    step = Number.isFinite(Number(step)) ? Math.max(1, Math.floor(Number(step))) : 2
     const out = []
     for (let y = 0; y < names.length; y += step) {
       let line = ''
@@ -1414,13 +1426,13 @@ export class McBot extends EventEmitter {
    *
    * @returns {{width:number,height:number,rgba:Uint8Array,center:object,radius:number,unloaded:number,legend:Array}}
    */
-  mapImage ({ radius = 32, scale = 4, yTop = 10, yBottom = -24, markSelf = true } = {}) {
-    const hm = this.heightmap({ radius, yTop, yBottom })
+  mapImage ({ radius = 32, scale = 4, yTop = 10, yBottom = -24, markSelf = true, heightmap: observedMap } = {}) {
+    const hm = observedMap ?? this.heightmap({ radius, yTop, yBottom })
     const h = hm.names.length
     const w = h > 0 ? hm.names[0].length : 0
     if (!w || !h) throw new Error('地形数据为空（区块可能还没加载）')
 
-    const s = Math.min(Math.max(Number(scale) || 4, 1), 16)
+    const s = Math.min(Math.max(Math.floor(Number(scale)) || 4, 1), 16)
     const W = w * s
     const H = h * s
     const rgba = new Uint8Array(W * H * 4)
@@ -1487,7 +1499,8 @@ export class McBot extends EventEmitter {
     }
     for (let y = y0 + 1; y <= top; y++) {
       const blk = at(y)
-      if (blk === null || !solid(blk)) return y - 1
+      if (blk === null) return null
+      if (!solid(blk)) return y - 1
     }
     return top
   }
@@ -1522,7 +1535,7 @@ export class McBot extends EventEmitter {
       heights.push(row)
     }
     if (min === Infinity) { min = y0; max = y0 }
-    return { center: { x: cx, y: cy, z: cz }, startY: y0, step: s, ignoreLiquid, bottom, top, min, max, gridWidth: cols, gridHeight: cols, heights }
+    return { center: { x: cx, y: cy, z: cz }, radius: R, startY: y0, step: s, ignoreLiquid, bottom, top, min, max, gridWidth: cols, gridHeight: cols, heights }
   }
 
   /** 高度网格 → 字符（模拟图片，" " 最低、'@' 最高；null = '?'） */
@@ -1537,13 +1550,13 @@ export class McBot extends EventEmitter {
   }
 
   /** 高度网格 → 分层设色 RGBA 图（每格最近邻放大 scale 倍；null 画成深灰） */
-  heightImage ({ radius = 32, step = 2, startY = null, scale = 4, ignoreLiquid = false } = {}) {
-    const g = this.heightGrid({ radius, step, startY, ignoreLiquid })
+  heightImage ({ radius = 32, step = 2, startY = null, scale = 4, ignoreLiquid = false, grid: observedGrid } = {}) {
+    const g = observedGrid ?? this.heightGrid({ radius, step, startY, ignoreLiquid })
     const grid = g.heights
     const h = grid.length
     const w = h > 0 ? grid[0].length : 0
     if (!w || !h) throw new Error('高度数据为空（区块可能还没加载）')
-    const s = Math.min(Math.max(Number(scale) || 4, 1), 16)
+    const s = Math.min(Math.max(Math.floor(Number(scale)) || 4, 1), 16)
     const W = w * s; const H = h * s
     const rgba = new Uint8Array(W * H * 4)
     const span = Math.max(1, g.max - g.min)

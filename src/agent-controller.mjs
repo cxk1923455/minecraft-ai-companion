@@ -1,4 +1,5 @@
 import { integer, itemName } from './gameplay-utils.mjs'
+import { stripChatAddress } from './chat-intents.mjs'
 
 const RESOURCE_NAMES = {
   '钻石': 'diamond', '钻石矿': 'diamond', '钻石矿石': 'diamond',
@@ -17,10 +18,7 @@ function quantity(value) {
 }
 /** Intentionally recognizes only complete, direct requests. Other language goes to the host model. */
 export function resourceRequest(text, aliases = []) {
-  let value = String(text ?? '').trim()
-  for (const alias of aliases) {
-    try { value = value.replace(new RegExp(`^(?:${alias})[\\s,，:：!！]*`, 'i'), '') } catch {}
-  }
+  let value = stripChatAddress(text, aliases)
   if (/不要|别|不用|不能|取消|如果|假如|他说|说过|能不能|是不是|[“”"‘’]/.test(value)) return null
   value = value.replace(/[\s,，:：。.!！?？~～]+/g, '')
   const names = Object.keys(RESOURCE_NAMES).sort((a, b) => b.length - a.length).join('|')
@@ -56,23 +54,38 @@ export class AgentController {
     const action = args.action ?? 'status'
     if (action === 'status') return this.status()
     if (action === 'pause') return this.skills.goals.suspend()
-    if (action === 'resume') return this.skills.goals.resume()
+    if (['resume', 'continue', 'recover'].includes(action)) {
+      const goals = this.skills.goals, job = goals.job
+      if (!job) throw new Error('没有可继续的原目标，请先说明要完成的任务')
+      if (!goals.running && !['paused', 'blocked', 'failed'].includes(job.state)) throw new Error(`原目标 ${job.state ?? '已结束'}，没有可恢复的任务；取消或成功的目标不能擅自重启`)
+      this.skills.follow = null
+      if (this.skills.followState) this.skills.followState.phase = 'inactive'
+      let task
+      if (job.state === 'paused') task = goals.resume()
+      else if (goals.running) task = goals.view()
+      else if (['blocked', 'failed'].includes(job.state) && typeof goals.retry === 'function') task = goals.retry(args)
+      else throw new Error(`原目标 ${job.state ?? '已结束'}，没有可恢复的任务；取消或成功的目标不能擅自重启`)
+      this.record({ action: 'continue', id: job.id, kind: job.kind, item: job.item })
+      return { outcome: 'started', reused: true, task, note: '继续原目标并解除跟随；以实际执行进展验收，不把启动说成完成。' }
+    }
     if (action === 'cancel') { const result = this.skills.halt('用户取消智能体任务'); this.record({ action: 'cancel' }); return result }
-    if (action !== 'start') throw new Error('action 为 start/status/pause/resume/cancel')
+    if (action !== 'start') throw new Error('action 为 start/status/pause/resume/continue/recover/cancel')
     const kind = args.kind ?? 'gather', bot = this.skills.bot
     if (kind === 'follow') { const result = this.skills.setFollow(args.who); this.record({ action: 'follow', who: args.who }); return result }
     if (!['gather', 'craft', 'build', 'explore', 'enter'].includes(kind)) throw new Error('kind 为 gather/craft/build/explore/enter/follow')
-    const item = chooseConcreteResource(bot, args.item ?? '')
+    const requestedItem = itemName(args.item ?? '')
+    const item = kind === 'gather' && requestedItem === 'log' ? 'log' : chooseConcreteResource(bot, requestedItem)
     const spec = { ...args, kind: kind === 'gather' ? 'collect' : kind, item,
       budgetMs: integer(args.budgetMs, kind === 'gather' && ['diamond', 'raw_gold', 'redstone', 'lapis_lazuli'].includes(item) ? 1800000 : 600000, 1000, 1800000, 'budgetMs'),
       radius: integer(args.radius, 32, 4, 128, 'radius'),
       useExisting: args.useExisting !== false }
     const current = this.skills.goals.job
-    if (this.skills.goals.running && current.kind === spec.kind && current.item === spec.item
+    if (current && current.kind === spec.kind && current.item === spec.item
       && kind !== 'build' && current.count === (spec.count ?? 1) && current.deliverTo === (spec.deliverTo ?? null) && current.who === (spec.who ?? null)
       && current.useExisting === spec.useExisting && current.radius === spec.radius
       && ['x', 'y', 'z'].every(k => current.target?.[k] === spec[k])) {
-      return { ...this.status(), outcome: 'started', reused: true, note: '相同目标已经运行，继续原计划，不重复启动。' }
+      if (current.state === 'paused' || !this.skills.goals.running && ['blocked', 'failed'].includes(current.state)) return this.act({ action: 'continue', budgetMs: spec.budgetMs })
+      if (this.skills.goals.running) return { ...this.status(), outcome: 'started', reused: true, note: '相同目标已经运行，继续原计划，不重复启动。' }
     }
     const task = this.skills.goals.start(spec)
     this.record({ action: 'start', kind, item: spec.item, count: spec.count ?? 1, deliverTo: spec.deliverTo ?? null,

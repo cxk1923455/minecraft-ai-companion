@@ -1,6 +1,8 @@
 # 玩家能力与用法
 
-当前增强版为 `0.2.0-beta.2.hiyori.6`，共有53个原生工具，面向 DSH 的 MC/MC+ 模式及 Minecraft Java 局域网/离线服务器。AI 用同一个 Mineflayer 游戏角色操作，插件内没有第二个模型。持续目标负责观察、备料、执行、验收和有限恢复；不能保证任意模组、任意玩法与真人水平完全相同。
+当前增强版为 `0.2.0-beta.2.hiyori.7`，共有54个原生工具，面向 DSH 的 MC/MC+ 模式及 Minecraft Java 局域网/离线服务器。AI 用同一个 Mineflayer 游戏角色操作，插件内没有第二个模型。持续目标负责结构化观察、备料、分段地形探索、执行、验收和恢复；不能保证任意模组、任意玩法与真人水平完全相同。
+
+新增 mc_observe 的JSON观测与变化记录；mc_agent 的 continue/recover 保留原目标和累计进度。“自己去找/继续挖”解除跟随继续原任务。泛称木材用log材料族，明确橡木则保留具体树种。地图可选json/svg供程序或人工读取，PNG和字符图保留。完整理由与预期收益见 [OPTIMIZATION-V7.md](OPTIMIZATION-V7.md)。
 
 | 能力 | 实际行为和验收 |
 | --- | --- |
@@ -60,4 +62,4 @@ AI 需要真实的玩家名、方块/实体或物品；找不到时应查询世�
 
 `npm run check` 验证语法、宿主/无宿主加载与全部功能测试。新回归使用真实 Minecraft 1.21.11 方块注册表、原生 pathfinder 加 prismarine physics 验证实际穿门坐标，并验证持续探索/阶梯开挖、取消及库存证据。有服务端/客户端两份库存的窗口夹具覆盖容器、交易和工作站。离线协议测试验证真实 Mineflayer 连接及技能挂载，使用1.16.5；这些夹具不模拟完整 Forge 服务端。
 
-更新后从“应用→退出”完全退出并重开 DSH；Windows 的 X 会隐藏窗口。MC设置顶部或 mc_status.runtime 中 runningVersion/installedVersion 应均为 hiyori.6、restartRequired 为 false。在相同工作区新建 MC 会话重新连接，先检查聊天同步、穿门和箱子取放，再尝试持续采矿。旧聊天、账号、自定义 RULES.md 和长期记忆无需删除。
+更新后从“应用→退出”完全退出并重开 DSH；Windows 的 X 会隐藏窗口。MC设置顶部或 mc_status.runtime 中 runningVersion/installedVersion 应均为 hiyori.7、restartRequired 为 false。在相同工作区新建 MC 会话重新连接，先检查聊天同步、穿门和箱子取放，再尝试持续采矿。旧聊天、账号、自定义 RULES.md 和长期记忆无需删除。

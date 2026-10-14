@@ -20,7 +20,7 @@ export function apply({ ctx, asTool, getSession, logLine }) {
     who: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, budgetMs: { type: 'integer' },
   }, (skills, args, signal) => skills.enter(args, signal), 125000)
   register('mc_agent', '持续执行玩家目标的智能体入口。start 启动后台 gather 找资源、craft 制作、enter 进入房间、explore 探索、build 蓝图、follow 跟随；status 查询实际阶段和进度，pause/resume/cancel 管理目标。gather 会检查背包、准备正确工具，附近没有资源就实际探索/安全下矿、遇阻换路线，直到验收或具体安全/时间边界；不会一次扫描无矿就结束。钻石可能需正常采矿时间，默认最多30分钟。deliverTo 可指定交接玩家；相同目标复用而不重复启动。', {
-    action: { type: 'string', enum: ['start', 'status', 'pause', 'resume', 'cancel'], required: true },
+    action: { type: 'string', enum: ['start', 'status', 'pause', 'resume', 'continue', 'recover', 'cancel'], required: true },
     kind: { type: 'string', enum: ['gather', 'craft', 'enter', 'explore', 'build', 'follow'] },
     item: { type: 'string' }, count: { type: 'integer' }, who: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, radius: { type: 'integer' }, budgetMs: { type: 'integer' }, deliverTo: { type: 'string' }, useExisting: { type: 'boolean' },
     blocks: { type: 'array', items: { type: 'object', additionalProperties: true } },
@@ -68,11 +68,12 @@ export function apply({ ctx, asTool, getSession, logLine }) {
     forward: { type: 'boolean' }, back: { type: 'boolean' }, left: { type: 'boolean' }, right: { type: 'boolean' }, jump: { type: 'boolean' }, sprint: { type: 'boolean' }, sneak: { type: 'boolean' }, durationMs: { type: 'integer' },
   }, (skills, args, signal) => skills.controls(args, signal), 10000)
   register('mc_goal', '后台连续执行目标，不阻塞当前对话：craft 自动补采材料、工具和工作站；collect 持续寻找资源并安全探索/下矿；enter 进入房间；build 蓝图备料并建造；explore 探索附近地形。action 为 start/status/pause/resume/cancel。采集或制作可用 deliverTo 指定交接玩家。优先用 mc_agent 规划完整目标；危险可能暂停，只有具体资源/安全/预算边界才结算未完成。', {
-    action: { type: 'string', enum: ['start', 'status', 'pause', 'resume', 'cancel'], required: true },
+    action: { type: 'string', enum: ['start', 'status', 'pause', 'resume', 'continue', 'recover', 'cancel'], required: true },
     kind: { type: 'string', enum: ['craft', 'collect', 'build', 'explore', 'enter'] }, item: { type: 'string' }, count: { type: 'integer' }, radius: { type: 'integer' }, budgetMs: { type: 'integer' }, deliverTo: { type: 'string' }, who: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, useExisting: { type: 'boolean' },
     blocks: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'build 蓝图：每项 x/y/z 整数和 name 材料，最多256格' },
   }, (skills, args) => {
     if (args.action === 'start') return skills.goals.start(args)
+    if (args.action === 'continue' || args.action === 'recover') return skills.agent.act(args)
     if (args.action === 'pause') return skills.goals.suspend()
     if (args.action === 'resume') return skills.goals.resume()
     if (args.action === 'cancel') { const result = skills.goals.cancel(); skills.active?.controller.abort('目标取消'); return result }

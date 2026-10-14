@@ -2,10 +2,12 @@ import vec3pkg from 'vec3'
 import pathfinderPkg from 'mineflayer-pathfinder'
 import { patchedGoto, assessExcavationFluidRisk } from './hiyori-skills.mjs'
 import { collectTarget } from './target-collection.mjs'
+import { isNaturalLog, materialCount } from './material-supply.mjs'
+import { TerrainExplorer } from './terrain-explorer.mjs'
 
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 const { goals } = pathfinderPkg
-const count = (bot, name) => (bot.inventory?.items?.() ?? []).filter(item => item.name === name).reduce((sum, item) => sum + item.count, 0)
+const count = materialCount
 const point = p => ({ x: Math.floor(p.x), y: Math.floor(p.y), z: Math.floor(p.z) })
 const key = p => `${Math.floor(p.x)},${Math.floor(p.y)},${Math.floor(p.z)}`
 const AIR = new Set(['air', 'cave_air', 'void_air'])
@@ -35,11 +37,21 @@ export class ResourceExpedition {
   constructor(skills, taskGoals, limits = {}) {
     this.skills = skills
     this.taskGoals = taskGoals
+    this.terrain = new TerrainExplorer(skills, { taskGoals })
     this.limits = { maxSteps: 384, maxMined: 896, maxFailures: 16, ...limits }
     this.states = new WeakMap()
     this.memory = new Map()
     this.body = null
     this.dimension = null
+  }
+  resetFailures(job) {
+    for (const state of this.states.get(job)?.values() ?? []) {
+      state.stepBudgetBase = state.steps; state.minedBudgetBase = state.mined
+      for (const p of state.failedVisits ?? []) { state.visited.delete(p); this.memory.delete(`${state.strategy.dimension}:${p}`) }
+      state.failedVisits?.clear()
+      state.failures = 0; state.reason = null; state.unreachable.clear(); state.rejected.clear()
+    }
+    this.terrain.resetFailures?.(job)
   }
   state(job, item) {
     const bot = this.skills.bot
@@ -59,7 +71,7 @@ export class ResourceExpedition {
     if (this.body !== bot || String(bot.game?.dimension ?? 'overworld') !== state.strategy.dimension) throw new Error('游戏身体或维度已变化，旧采矿路线已停止')
     if ((bot.health ?? 20) <= (this.skills.settings?.healthThreshold ?? 6)) throw new Error('需要补给：血量过低，停止继续下矿')
     if ((bot.food ?? 20) <= 6 && !(bot.inventory.items() ?? []).some(item => FOODS.has(item.name))) throw new Error('需要补给：饥饿且没有可用食物，已暂停下矿')
-    const canMerge = bot.inventory.items().some(item => item.name === state.item && item.count < (bot.registry.itemsByName[item.name]?.stackSize ?? 64))
+    const canMerge = bot.inventory.items().some(item => (state.item === 'log' ? isNaturalLog(item.name) : item.name === state.item) && item.count < (bot.registry.itemsByName[item.name]?.stackSize ?? 64))
     if ((bot.inventory.emptySlotCount?.() ?? 1) === 0 && count(bot, state.item) < (state.total ?? Infinity) && !canMerge) throw new Error('需要卸货：背包已满，不能确认新资源拾取')
     this.publish(job, state)
   }
@@ -72,7 +84,7 @@ export class ResourceExpedition {
     this.memory.set(id, reason ?? 'visited')
     if (this.memory.size > 1024) this.memory.delete(this.memory.keys().next().value)
     state.visited.add(key(p))
-    if (reason) { state.rejected.set(key(p), reason); state.reason = reason }
+    if (reason) { state.rejected.set(key(p), reason); state.reason = reason; (state.failedVisits ??= new Set()).add(key(p)) }
     this.publish(this.currentJob, state)
   }
   picks(bot, required = 'wooden_pickaxe') {
@@ -94,7 +106,7 @@ export class ResourceExpedition {
     if ((bot.food ?? 20) <= 12 && bot.inventory.items().some(item => FOODS.has(item.name)) && this.skills.eat) await this.taskGoals.step(job, '补给进食', signal => this.skills.eat(signal))
     if (state.strategy.underground && !bot.inventory.items().some(item => FOODS.has(item.name))) state.warning = '背包未携带食物；饥饿或低血量时会停止下矿并报告补给需求'
   }
-  names(bot, item) { return item === 'log' ? (bot.registry.blocksArray ?? []).filter(block => /_log$|_stem$/.test(block.name) && !/^stripped_/.test(block.name)).map(block => block.name) : SOURCES[item] ?? [item] }
+  names(bot, item) { return item === 'log' ? (bot.registry.blocksArray ?? []).filter(block => isNaturalLog(block.name)).map(block => block.name) : SOURCES[item] ?? [item] }
   nearby(state, radius) {
     const bot = this.skills.bot
     const ids = this.names(bot, state.item).map(name => bot.registry.blocksByName[name]?.id).filter(id => id !== undefined)
@@ -146,7 +158,7 @@ export class ResourceExpedition {
     if (fluid.unsafe) { state.rejected.set(key(block.position), `资源邻近 ${fluid.liquid}`); state.reason = `资源邻近 ${fluid.liquid}`; return false }
     // Tree resources are intentionally collected by the existing helper; tunnel excavation never breaks logs.
     const surfaceLoose = ['sand', 'gravel'].includes(state.item) && block.name === state.item && block.position.y >= bot.entity.position.y - 1 && !FALLING.test(bot.blockAt(block.position.offset(0, 1, 0))?.name ?? '')
-    if (hazard && !/_log$|_stem$/.test(block.name) && !surfaceLoose) { state.rejected.set(key(block.position), hazard); state.reason = hazard; return false }
+    if (hazard && !isNaturalLog(block.name) && !surfaceLoose) { state.rejected.set(key(block.position), hazard); state.reason = hazard; return false }
     if (this.constructionNear(block.position)) { state.rejected.set(key(block.position), '保护建筑中的资源方块'); return false }
     try {
       await this.taskGoals.step(job, `采集已观察到的 ${state.item}`, signal => this.skills.run(`收取 ${block.name}`, signal, async (s, b) => {
@@ -179,6 +191,13 @@ export class ResourceExpedition {
     return false
   }
   async explore(job, state, preferLower = false) {
+    const terrain = await this.terrain.advance(job, { purpose: state.item === 'log' || /_log$|_stem$/.test(state.item) ? 'wood' : preferLower ? 'cave' : 'resource', item: state.item, preferLower })
+    if (terrain.moved) {
+      state.explored++; state.failures = 0
+      this.remember(state, this.skills.bot.entity.position)
+      return true
+    }
+    state.reason = terrain.reason ?? state.reason
     const bot = this.skills.bot, origin = bot.entity.position.floored(), candidates = []
     const vertical = preferLower ? [-1, -2, -3, -4, -5, 0, 1, 2] : [0, -1, 1, -2, 2, -3, -4]
     for (const distance of [4, 8, 12]) for (let direction = 0; direction < 8; direction++) {
@@ -218,7 +237,7 @@ export class ResourceExpedition {
       const unique = cells.filter((p, i) => cells.findIndex(q => key(q) === key(p)) === i)
       const hazard = unique.map(p => this.unsafeBreak(p, origin)).find(Boolean)
       if (hazard) { state.rejected.set(key(target), hazard); state.reason = hazard; continue }
-      if (state.mined + unique.filter(p => !AIR.has(bot.blockAt(p).name)).length > this.limits.maxMined) { state.reason = '自然岩层挖掘预算耗尽'; return false }
+      if (state.mined - (state.minedBudgetBase ?? 0) + unique.filter(p => !AIR.has(bot.blockAt(p).name)).length > this.limits.maxMined) { state.reason = '自然岩层挖掘预算耗尽'; return false }
       const miningTool = TOOLS[state.item] ?? 'wooden_pickaxe'
       if (!this.picks(bot, miningTool).some(entry => entry.remaining > 12)) await this.taskGoals.ensure(job, miningTool, count(bot, miningTool) + 1, ancestry)
       try {
@@ -244,6 +263,7 @@ export class ResourceExpedition {
           if (!this.safeStanding(target)) throw new Error('挖开后落脚地板或头部空间变化，停止前进')
         }, 50000))
         if (await this.walk(job, state, target, '走入已验证的阶梯/矿道', true)) {
+          state.failures = 0
           state.direction = index; state.branchLength++
           if (!descending && state.branchLength >= 24) { state.direction = (index + 1) % 4; state.branchLength = 0 }
           return true
@@ -270,7 +290,7 @@ export class ResourceExpedition {
     if (await this.verify(job, state, total)) return this.result(state, start, total)
     if (!state.strategy.valid) throw new Error(`${state.strategy.dimension} 没有自然生成的 ${item}；请先通过正常传送门回到主世界`)
     await this.prepare(job, state, ancestry)
-    const limit = this.limits.maxSteps
+    const limit = this.limits.maxSteps + (state.stepBudgetBase ?? 0)
     for (; state.steps < limit && state.failures < this.limits.maxFailures; state.steps++) {
       await this.ready(job, state)
       if (await this.verify(job, state, total)) return this.result(state, start, total)
@@ -290,9 +310,14 @@ export class ResourceExpedition {
           initialAttemptDone = true
           const before = count(bot, item)
           const remaining = Math.max(1000, (job.deadline ?? Date.now() + 15000) - Date.now())
-          const result = await this.taskGoals.step(job, `附近初次检查 ${item}`, signal => count(bot, item) >= total ? { outcome: 'succeeded' } : this.skills.collect({ item, count: Math.max(1, Math.min(64, total - count(bot, item))), radius: job.radius ?? 32, budgetMs: Math.min(15000, remaining) }, signal))
-          if (count(bot, item) > before) continue
-          state.reason = result.reason ?? '当前位置没有可采集资源；开始实际换区域/下矿'
+          try {
+            const result = await this.taskGoals.step(job, `附近初次检查 ${item}`, signal => count(bot, item) >= total ? { outcome: 'succeeded' } : this.skills.collect({ item, count: Math.max(1, Math.min(64, total - count(bot, item))), radius: job.radius ?? 32, budgetMs: Math.min(15000, remaining) }, signal))
+            if (count(bot, item) > before) { state.failures = 0; continue }
+            state.reason = result.reason ?? '当前位置没有可采集资源；开始实际换区域/下矿'
+          } catch (error) {
+            job.controller.signal.throwIfAborted()
+            state.reason = `附近尝试受阻，继续实际探索：${error.message}`
+          }
         }
       }
       this.remember(state, origin)

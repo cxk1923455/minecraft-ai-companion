@@ -180,7 +180,7 @@ export class SurvivalSkills {
     return {
       online: this.host.online, active: this.active?.label ?? null,
       position: position(this.raw?.entity?.position),
-      follow: this.follow ? { player: this.follow, visible: Boolean(target), distance: distance === null ? null : Number(distance.toFixed(2)), verifiedNearby: playerInReach(this.raw, target, this.settings.followDistance + 0.5), unobstructed: target ? playerInReach(this.raw, target, Infinity) : false, suspended: this.busy || this.paused || this.goals.running, phase: this.followState.phase, recoveryAttempts: this.followState.attempts } : null,
+      follow: this.follow ? { player: this.follow, visible: Boolean(target), distance: distance === null ? null : Number(distance.toFixed(2)), verifiedNearby: playerInReach(this.raw, target, this.settings.followDistance + 0.5), unobstructed: target ? playerInReach(this.raw, target, Infinity) : false, suspended: this.busy || this.paused || this.goals.pending, phase: this.followState.phase, recoveryAttempts: this.followState.attempts } : null,
       settings: { ...this.settings }, paused: this.paused,
       lastResult: this.lastResult, pathfinding: 'A* / 5ms search slices',
       waitingForCancelledAction: Boolean(this.quarantine),
@@ -297,7 +297,7 @@ export class SurvivalSkills {
     return entry?.entity
   }
   restoreFollow() {
-    if (!this.follow || this.busy || this.quarantine || this.paused || this.goals.running || !this.host.online || !this.raw?.pathfinder) return
+    if (!this.follow || this.busy || this.quarantine || this.paused || this.goals.pending || !this.host.online || !this.raw?.pathfinder) return
     const target = this.findPlayer(this.follow)
     if (target) {
       if (playerInReach(this.raw, target, this.settings.followDistance)) { this.followState.phase = 'nearby'; return }
@@ -315,6 +315,7 @@ export class SurvivalSkills {
     const b = this.bot
     if (typeof player !== 'string' || !player.trim()) throw new Error('需要玩家名称 who')
     if (player.toLowerCase() === b.username?.toLowerCase()) throw new Error('不能跟随自己')
+    if (this.goals.pending) this.goals.cancel('新的明确跟随请求替换旧目标')
     this.release(b)
     this.follow = player.trim()
     this.followState = { phase: 'waiting', attempts: 0, lastProgressAt: Date.now(), position: b.entity.position.clone() }
@@ -610,7 +611,7 @@ export class SurvivalSkills {
     }, budget)
   }
   updateFollow(now) {
-    if (!this.follow || this.busy || this.goals.running || now - this.lastFollowCheck < 200) return
+    if (!this.follow || this.busy || this.goals.pending || now - this.lastFollowCheck < 200) return
     this.lastFollowCheck = now
     const b = this.raw, target = this.findPlayer(this.follow), state = this.followState
     if (!target) { if (state.phase !== 'waiting') this.release(b); state.phase = 'waiting'; return }

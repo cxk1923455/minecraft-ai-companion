@@ -2,6 +2,8 @@
 
 让 AI 作为陪玩接入 Minecraft Java 局域网世界或离线服务器。
 
+当前增强版 hiyori.7：分段上下坡探索、通用木材备料、原目标恢复、看门狗进度合并与投递重试，以及不依赖图片的结构化世界观测。逐项修改理由、收益、指标和替代项目比较见 [OPTIMIZATION-V7.md](OPTIMIZATION-V7.md)；数据接口细节见 [OBSERVATION-DESIGN.md](OBSERVATION-DESIGN.md)。
+
 这是基于 [Whale Craft](https://github.com/yzi1b/whale-craft) 0.2.0-beta.2 的增强版，集成 Hiyori Minecraft 辅助技能，保留 DSH 原生插件界面和每会话一个机器人。目前通过 DSH 工具接口接入 AI，尚未实现通用 MCP 协议服务。
 
 - 稳定跟随、安全寻路、采集、合成与熔炼。
@@ -25,8 +27,8 @@
 # Whale Craft / 鲸鱼工艺
 
 > 本目录是基于用户提供的 `0.2.0-beta.2` 制作的本地 Hiyori 增强版
-> `0.2.0-beta.2.hiyori.6`。包含持续采矿智能体、生存寻路、跟随、采集合成、容器取放、实际穿门、游戏聊天同步，以及装备、防御、农务、交易和工作站操作。
-> 具体能力、用法与实测边界见 [玩家能力说明](PLAYER-CAPABILITIES.md)。当前共有 53 个原生工具；增强版没有发布到公共 npm。
+> `0.2.0-beta.2.hiyori.7`。包含地形探索、目标恢复、结构化观测、持续采矿、生存寻路、跟随、容器与常用玩家操作。
+> 具体能力、用法与实测边界见 [玩家能力说明](PLAYER-CAPABILITIES.md)。当前共有 54 个原生工具；增强版没有发布到公共 npm。
 > 安装与新增工具说明见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。下文保留原版说明。
 
 **[English ↓](#english)** · 中文 · [![CI](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml/badge.svg)](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml)
@@ -105,7 +107,7 @@ dsh plugin --profile web add github:cxk1923455/minecraft-ai-companion
 从下载的增强版 `.tgz` 安装（按实际下载路径修改）：
 
 ```bash
-dsh plugin --profile desktop add 'file:C:/Downloads/whale_craft-0.2.0-beta.2.hiyori.6.tgz'
+dsh plugin --profile desktop add 'file:C:/Downloads/whale_craft-0.2.0-beta.2.hiyori.7.tgz'
 ```
 
 别忘了重启DSH。

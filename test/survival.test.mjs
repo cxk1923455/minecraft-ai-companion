@@ -391,7 +391,7 @@ test('a stone pickaxe goal from an empty inventory prepares its tools and workbe
   }
   host.placeBlock = async block => { workstations.set(`${block.x},${block.y},${block.z}`, block.name); raw.stock[block.name]-- }
   const gathered = []
-  skills.collect = async (args, signal) => { signal.throwIfAborted(); assert.ok(!/^stripped_|_wood$|_hyphae$|bamboo_block/.test(args.item), `processed wood is not a naturally gatherable tree: ${args.item}`); gathered.push(args.item); raw.stock[args.item] = (raw.stock[args.item] ?? 0) + args.count; return { outcome: 'succeeded', collected: args.count } }
+  skills.collect = async (args, signal) => { signal.throwIfAborted(); const item = args.item === 'log' ? 'oak_log' : args.item; assert.ok(!/^stripped_|_wood$|_hyphae$|bamboo_block/.test(item), `processed wood is not a naturally gatherable tree: ${item}`); gathered.push(item); raw.stock[item] = (raw.stock[item] ?? 0) + args.count; return { outcome: 'succeeded', collected: args.count } }
   skills.goals.start({ kind: 'craft', item: 'stone_pickaxe', count: 1 })
   await skills.goals.job.done
   assert.equal(skills.goals.view().state, 'succeeded', JSON.stringify(skills.goals.view()))
@@ -423,6 +423,7 @@ test('empty-inventory iron-pickaxe preparation uses real recipes and raw-iron sm
   }
   host.placeBlock = async block => { stations.set(new Vec3(block.x, block.y, block.z).toString(), block.name); raw.stock[block.name]-- }
   skills.collect = async ({ item, count }) => {
+    item = item === 'log' ? 'oak_log' : item
     assert.ok(/_log$/.test(item) && !item.startsWith('stripped_') || ['cobblestone', 'raw_iron', 'coal'].includes(item), `unexpected natural resource: ${item}`)
     gathered.push(item); raw.stock[item] = (raw.stock[item] ?? 0) + count
     return { outcome: 'succeeded', collected: count }
@@ -606,4 +607,65 @@ test('resource planning retains decompression recipes for storage blocks actuall
   assert.equal(plan.canCraftNow, true, JSON.stringify(plan))
   assert.equal(plan.totalRequired.coal_block, 1)
   assert.equal(plan.steps.at(-1).item, 'coal')
+})
+test('a recoverable resource objective keeps its id and does not silently return to following', async () => {
+  const { raw, skills } = fixture()
+  raw.players.Player = { entity: { position: new Vec3(5, 64, 0) } }
+  skills.setFollow('Player')
+  let requests = 0
+  skills.goals.expedition.obtain = async (_job, item, total) => {
+    requests++; raw.stock[item] = (raw.stock[item] ?? 0) + Math.min(2, total - (raw.stock[item] ?? 0))
+    return { outcome: raw.stock[item] >= total ? 'succeeded' : 'partial', reason: 'needs another region' }
+  }
+  skills.goals.start({ kind: 'collect', item: 'diamond', count: 4, useExisting: true })
+  const job = skills.goals.job, id = job.id
+  await job.done
+  assert.equal(job.state, 'blocked'); assert.equal(raw.pathfinder.goal, null)
+  skills.updateFollow(Date.now() + 1000); assert.equal(raw.pathfinder.goal, null)
+  skills.agent.act({ action: 'continue' }); await job.done
+  assert.equal(job.id, id); assert.equal(job.state, 'succeeded'); assert.equal(raw.stock.diamond, 4)
+  assert.equal(job.retries, 1); assert.equal(requests, 2); assert.equal(skills.follow, null)
+})
+test('recovering partial delivery finishes only the unfulfilled quantity', async () => {
+  const { raw, skills } = fixture()
+  raw.players.Player = { entity: { position: new Vec3(1, 64, 0) } }
+  skills.goals.expedition.obtain = async (_job, item, total) => {
+    raw.stock[item] = (raw.stock[item] ?? 0) + Math.min(2, total - (raw.stock[item] ?? 0))
+    return { outcome: raw.stock[item] >= total ? 'succeeded' : 'partial' }
+  }
+  let delivered = 0
+  skills.host.tossItem = async ({ name, count }) => { raw.stock[name] -= count; delivered += count }
+  skills.agent.act({ action: 'start', kind: 'gather', item: 'diamond', count: 4, deliverTo: 'Player' })
+  const job = skills.goals.job
+  await job.done; assert.equal(job.state, 'blocked'); assert.equal(delivered, 2)
+  skills.agent.act({ action: 'continue' }); await job.done
+  assert.equal(job.state, 'succeeded', JSON.stringify(skills.goals.view()))
+  assert.equal(delivered, 4); assert.equal(raw.stock.diamond, 0); assert.equal(job.result.delivery.dropped, 4)
+})
+test('resource retry renews execution quotas while retaining cumulative progress', () => {
+  const { skills } = fixture(), job = { progress: {} }, expedition = skills.goals.expedition
+  const state = expedition.state(job, 'diamond')
+  state.steps = 384; state.mined = 896; state.failures = 16
+  expedition.resetFailures(job)
+  assert.equal(state.steps, 384); assert.equal(state.mined, 896)
+  assert.equal(state.stepBudgetBase, 384); assert.equal(state.minedBudgetBase, 896); assert.equal(state.failures, 0)
+})
+test('a generic pickaxe can prepare from a newly found birch forest without any oak', async () => {
+  const { raw, skills, host } = fixture(), stations = new Map()
+  const Recipe = mfRequire('prismarine-recipe')(registry).Recipe
+  raw.recipesFor = (id, _metadata, _count, table) => Recipe.find(id, null).filter(recipe => (!recipe.requiresTable || table)
+    && recipe.delta.every(delta => delta.count >= 0 || (raw.stock[registry.items[delta.id].name] ?? 0) >= -delta.count))
+  raw.craft = async recipe => { for (const delta of recipe.delta) { const name = registry.items[delta.id].name; raw.stock[name] = (raw.stock[name] ?? 0) + delta.count } }
+  raw.blockAt = p => ({ name: stations.get(p.toString()) ?? (p.y === 63 ? 'stone' : 'air'), position: p, boundingBox: stations.has(p.toString()) || p.y === 63 ? 'block' : 'empty' })
+  raw.findBlock = ({ matching }) => {
+    const found = [...stations].find(([, name]) => registry.blocksByName[name].id === matching)
+    return found ? { name: found[1], position: new Vec3(...found[0].slice(1, -1).split(',').map(Number)) } : null
+  }
+  host.placeBlock = async block => { stations.set(new Vec3(block.x, block.y, block.z).toString(), block.name); raw.stock[block.name]-- }
+  const gathered = []
+  skills.collect = async ({ item, count }) => { assert.equal(item, 'log'); gathered.push(item); raw.stock.birch_log = (raw.stock.birch_log ?? 0) + count; return { outcome: 'succeeded' } }
+  skills.goals.start({ kind: 'craft', item: 'wooden_pickaxe', count: 1, budgetMs: 15000 })
+  await skills.goals.job.done
+  assert.equal(skills.goals.job.state, 'succeeded', JSON.stringify(skills.goals.view()))
+  assert.equal(raw.stock.wooden_pickaxe, 1); assert.ok(gathered.length); assert.equal(raw.stock.oak_log, undefined)
 })

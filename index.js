@@ -55,6 +55,8 @@ import { apply as applyHiyoriSkills } from './extensions/hiyori-survival.mjs'
 import { runtimeState } from './src/runtime-state.mjs'
 import { ChatBridge } from './src/chat-bridge.mjs'
 import { createRuntimeHealth } from './src/runtime-health.mjs'
+import { WorldObserver } from './src/observation.mjs'
+import { mapGridData, heightGridData, gridSvg } from './src/map-format.mjs'
 
 export const name = 'whale_craft'
 export const inject = ['webServer', 'tools']
@@ -170,6 +172,8 @@ class McSession {
     //    （装进 node_modules 后可能是只读的，升级时也会被覆盖）——与日志同一条理由。
     this.bot = new McBot({ instanceId: agentId, ...(lockDir ? { lockDir } : {}) })
     this.chatBridge = new ChatBridge(this.bot)
+    this.observer = new WorldObserver(this.bot)
+    this.bot.observer = this.observer
     this.mode = 'standby'           // standby / active / sleep
     this.events = []                // 未消费的 MC 事件
     this.maxEvents = 200
@@ -214,6 +218,7 @@ class McSession {
   /* ── 清理 ── */
 
   destroy() {
+    this.observer.dispose()
     this.chatBridge.destroy()
     try { this.watchdog?.disarm('会话结束') } catch {}
     try { this.bot.disconnect('会话结束') } catch {}
@@ -1771,6 +1776,7 @@ export function apply(ctx, rawConfig) {
     const base = {
       online: s.online,
       runtime: getRuntimeHealth(),
+      autonomy: sess.bot.skills.agent.status(),
       chatSync: { enabled: pluginConfig.get('syncChatToGame') !== false, ...sess.chatBridge.status() },
       connection: s.connection,        // { host, port, version }
       lastError: s.lastError ?? null,
@@ -2277,12 +2283,22 @@ export function apply(ctx, rawConfig) {
     },
   }))
 
-  /** `mc_map` / `mc_height` 共用的输出渲染：有 text 出 text，有 image.attachment 出图片块，都没有 → note。 */
+  ctx.tools.register(asTool({
+    name: 'mc_observe',
+    description: '结构化世界感知，优先用于自主决策：真实位置/库存、可见玩家与威胁、已采样资源/门/容器/工作站、地形高差、未知列和当前任务。无图片/视觉模型依赖，采样和输出有预算。delta=true + sinceRevision 返回实际变化与完整有界当前状态；不存在地标不等于全世界没有，落脚点需寻路验证。',
+    parameters: { radius: { type: 'integer' }, detail: { type: 'string', enum: ['compact', 'full'] }, delta: { type: 'boolean' }, sinceRevision: { type: 'integer' }, item: { type: 'string' } },
+    output: text(),
+    execute(args, exec) { return getSession(exec).observer.observe({ ...args, signal: exec?.signal }) },
+  }))
+
+  /** Existing image/character outputs remain available beside structured data. */
   const mapLikeOutput = {
     schema: { type: 'object', properties: {}, additionalProperties: true },
     render: (args, value) => {
       const blocks = []
       if (value?.text) blocks.push({ type: 'text', text: String(value.text) })
+      if (value?.csv) blocks.push({ type: 'text', text: String(value.csv) })
+      if (value?.data) blocks.push({ type: 'text', text: JSON.stringify(value.data) })
       if (value?.image?.attachment) blocks.push({ type: 'image', attachment: value.image.attachment })
       if (!blocks.length) blocks.push({ type: 'text', text: String(value?.note ?? '(no output)') })
       return blocks
@@ -2293,7 +2309,7 @@ export function apply(ctx, rawConfig) {
     name: 'mc_map',
     description: '看周围地形。format="chars"（默认）返回**字符地形图**（无视觉也能读：'
       + '@ 是我 · ~ 水 · . 沙 · " 草木 · T 木构 · : 石/建筑 · _ 土/农田 · # 白 · ? 未加载）；'
-      + 'format="image" 生成**真彩俯视图**（模型有视觉时直接能看）。'
+      + 'format="json" 返回带坐标、实际高度、未知标记和压缩方块字典的数据；自主决策优先 mc_observe。format="svg" 保存可缩放矢量地图；format="image" 保留真彩PNG俯视图。'
       + '`reply`（默认 true）= 结果是否回复到上下文；`dist` = 结果写到的文件路径（可空，写文件与 reply 互不影响）。'
       + '路径：绝对照用，相对以**工作区根**为基准。字符图存 .txt、图像存 .png。'
       + '网格方向**上北下南 · 左西右东**。'
@@ -2303,7 +2319,7 @@ export function apply(ctx, rawConfig) {
       glyphStep: { type: 'number', description: '字符图抽稀步长（默认 2；1 最细）' },
       yTop: { type: 'number', description: '地表搜索起始高度偏移（默认 +10）' },
       yBottom: { type: 'number', description: '向下搜索深度（默认 -24）' },
-      format: { type: 'string', description: 'chars（默认）/ image' },
+      format: { type: 'string', description: 'chars（默认）/ json / svg / image' },
       scale: { type: 'number', description: '图像每格放大倍数（默认 4，1–16）' },
       reply: { type: 'boolean', description: 'true（默认）= 结果回复到上下文；false = 只写文件、回一行 stub' },
       dist: { type: 'string', description: '输出文件路径（可空）；绝对路径或相对工作区根。chars→.txt、image→.png' },
@@ -2317,6 +2333,14 @@ export function apply(ctx, rawConfig) {
       const step = Math.max(1, Number(args.glyphStep ?? 2))
       const hm = sess.bot.heightmap({ radius: args.radius, yTop: args.yTop, yBottom: args.yBottom })
       const out = { center: hm.center, radius: hm.radius, unloadedTiles: hm.unloaded, legend: hm.legend.slice(0, 15), format }
+      if (format === 'json' || format === 'svg') {
+        const data = mapGridData(hm, { step })
+        if (reply) out.data = data
+        const dist = outputPathFor(args.dist ?? (format === 'svg' ? '.whale-craft/out/map.svg' : null), exec?.agent)
+        if (dist) { const file = withExt(dist, format === 'svg' ? '.svg' : '.json'); out.written = { file, bytes: writeOutputFile(file, Buffer.from(format === 'svg' ? gridSvg(data) : JSON.stringify(data), 'utf8')) } }
+        if (!reply) out.note = out.written ? `已写入 ${out.written.file}` : '没有请求输出文件'
+        return out
+      }
 
       if (format === 'chars') {
         const glyphMap = McBot.glyphMap(hm.names, step, { x: hm.radius, y: hm.radius })
@@ -2328,7 +2352,7 @@ export function apply(ctx, rawConfig) {
       }
 
       if (format === 'image') {
-        const img = sess.bot.mapImage({ radius: args.radius, yTop: args.yTop, yBottom: args.yBottom, scale: args.scale })
+        const img = sess.bot.mapImage({ radius: args.radius, yTop: args.yTop, yBottom: args.yBottom, scale: args.scale, heightmap: hm })
         const png = encodePng(img.width, img.height, img.rgba)
         out.image = { width: img.width, height: img.height, bytes: png.length, scale: img.scale }
         const dist = outputPathFor(args.dist, exec?.agent)
@@ -2341,7 +2365,7 @@ export function apply(ctx, rawConfig) {
         return out
       }
 
-      throw new Error(`未知 format："${format}"（可用 chars / image）`)
+      throw new Error(`未知 format："${format}"（可用 chars / json / svg / image）`)
     },
   }))
 
@@ -2349,7 +2373,7 @@ export function apply(ctx, rawConfig) {
     name: 'mc_height',
     description: '获取高度（地势）图：每列取一个"地表 Y"——`startY` 处无方块则向下找第一个方块取 Y，'
       + '有方块则向上找第一个空格取 Y−1。`startY` 留空 = 当前所在 Y。按 `glyphStep` 抽样（省算力）；`ignoreLiquid:true` 把液体当空气。'
-      + 'format="chars"（默认）用字符模拟（低→高）；"image" 分层设色等高图；"full" **逐格填高度值的 CSV**（一格一个 Y，不是 x/y/z 坐标）。'
+      + 'format="chars"（默认）用字符模拟；"json" 为明确坐标/步长/未知列的高度网格；"svg" 保存可缩放矢量图；"image" 分层设色PNG；"full" 为逐格高度CSV。'
       + '网格方向**上北下南 · 左西右东**（每行一串 Y，行=北→南，列=西→东）。'
       + '`scale` 仅 image 有效；chars 存 .txt、full 存 .csv。`reply`/`dist` 语义同 `mc_map`。',
     parameters: {
@@ -2357,7 +2381,7 @@ export function apply(ctx, rawConfig) {
       glyphStep: { type: 'number', description: '抽样步长（默认 2）' },
       startY: { type: 'number', description: '起始 Y（留空 = 当前所在 Y）' },
       ignoreLiquid: { type: 'boolean', description: 'true = 把液体视为无方块（水面/岩浆下的地面才算地表）' },
-      format: { type: 'string', description: 'chars（默认）/ image / full' },
+      format: { type: 'string', description: 'chars（默认）/ json / svg / image / full' },
       scale: { type: 'number', description: '图像放大倍数（默认 4，1–16，仅 image）' },
       reply: { type: 'boolean', description: 'true（默认）= 结果回复到上下文；false = 只写文件、回一行 stub' },
       dist: { type: 'string', description: '输出文件路径（可空）；绝对路径或相对工作区根。chars→.txt、image→.png、full→.csv' },
@@ -2372,6 +2396,14 @@ export function apply(ctx, rawConfig) {
       const ignoreLiquid = args.ignoreLiquid === true
       const g = sess.bot.heightGrid({ radius: args.radius, step, startY: args.startY, ignoreLiquid })
       const out = { center: g.center, startY: g.startY, step: g.step, ignoreLiquid, min: g.min, max: g.max, grid: `${g.gridWidth}x${g.gridHeight}`, format }
+      if (format === 'json' || format === 'svg') {
+        const data = heightGridData(g)
+        if (reply) out.data = data
+        const dist = outputPathFor(args.dist ?? (format === 'svg' ? '.whale-craft/out/height.svg' : null), exec?.agent)
+        if (dist) { const file = withExt(dist, format === 'svg' ? '.svg' : '.json'); out.written = { file, bytes: writeOutputFile(file, Buffer.from(format === 'svg' ? gridSvg(data) : JSON.stringify(data), 'utf8')) } }
+        if (!reply) out.note = out.written ? `已写入 ${out.written.file}` : '没有请求输出文件'
+        return out
+      }
 
       if (format === 'full') {
         const csv = g.heights.map((row) => row.map((h) => (h === null ? '' : String(h))).join(',')).join('\n')
@@ -2392,7 +2424,7 @@ export function apply(ctx, rawConfig) {
       }
 
       if (format === 'image') {
-        const img = sess.bot.heightImage({ radius: args.radius, step, startY: args.startY, scale: args.scale, ignoreLiquid })
+        const img = sess.bot.heightImage({ radius: args.radius, step, startY: args.startY, scale: args.scale, ignoreLiquid, grid: g })
         const png = encodePng(img.width, img.height, img.rgba)
         out.image = { width: img.width, height: img.height, bytes: png.length, scale: img.scale }
         const dist = outputPathFor(args.dist, exec?.agent)
@@ -2405,7 +2437,7 @@ export function apply(ctx, rawConfig) {
         return out
       }
 
-      throw new Error(`未知 format："${format}"（可用 chars / image / full）`)
+      throw new Error(`未知 format："${format}"（可用 chars / json / svg / image / full）`)
     },
   }))
 
