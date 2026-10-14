@@ -5,9 +5,14 @@ import collectPkg from 'mineflayer-collectblock'
 import vec3pkg from 'vec3'
 import { TaskGoals } from './task-goals.mjs'
 import { planInWorker } from './craft-planner.mjs'
-import { recipesSourceFor, patchedGoto, protectMovementsFromFluid, assessExcavationFluidRisk, runAbortableOperation, smeltInputFor } from './hiyori-skills.mjs'
+import { playerMovements, PlayerFollowGoal, PlayerNearGoal, InteractionGoal, playerInReach, lineOfSight, canHandOpen, doorBase, setDoorState } from './player-navigation.mjs'
+import { containerAction } from './containers.mjs'
+import { equipmentAction, equipmentPlan, equipBestBody, interactAction, itemAction, playerAction } from './player-actions.mjs'
+import { farmAction } from './farming.mjs'
+import { tradeAction, stationAction, controlsAction } from './stations.mjs'
+import { recipesSourceFor, patchedGoto, assessExcavationFluidRisk, runAbortableOperation, smeltInputFor } from './hiyori-skills.mjs'
 
-const { pathfinder, Movements, goals } = pathfinderPkg
+const { pathfinder, goals } = pathfinderPkg
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 const BODY_TOOLS = new Set(['mc_move', 'mc_act', 'mc_give', 'mc_sequence', 'mc_build', 'mc_dig', 'mc_command'])
 const FOOD = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken', 'cooked_salmon', 'cooked_cod', 'bread', 'baked_potato', 'carrot', 'apple', 'melon_slice', 'sweet_berries']
@@ -44,9 +49,15 @@ export class SurvivalSkills {
     this.followState = { phase: 'inactive', attempts: 0, lastProgressAt: 0, position: null }
     this.paused = false
     this.pendingReflex = false
+    this.pendingCalls = new Set()
     this.reflexUntil = 0
     this.lastFollowCheck = 0
-    this.settings = { autoEat: true, autoSurface: true, autoRetreat: true, autoDefend: true, foodThreshold: 6, oxygenThreshold: 10, healthThreshold: 6, followDistance: 2 }
+    this.settings = { autoEat: true, autoSurface: true, autoRetreat: true, autoDefend: true, autoEquip: true, doorAssist: true, foodThreshold: 12, oxygenThreshold: 10, healthThreshold: 6, followDistance: 2 }
+    this.blockedDoors = new Map()
+    this.doorController = null
+    this.originalActivate = null
+    this.activateWrapper = null
+    this.lastEquipmentCheck = 0
     this.goals = new TaskGoals(this)
     this.metrics = { followReplans: 0, interruptions: 0, localDecisions: 0, decisionMsMax: 0 }
     this.decisionSamples = []
@@ -80,24 +91,56 @@ export class SurvivalSkills {
     if (!b.pathfinder) b.loadPlugin(pathfinder)
     if (!b.tool) b.loadPlugin(toolPkg.plugin)
     if (!b.collectBlock) b.loadPlugin(collectPkg.plugin)
-    const movements = protectMovementsFromFluid(b, new Movements(b))
-    movements.canDig = false
-    movements.allow1by1towers = false
-    b.pathfinder.setMovements(movements)
+    b.pathfinder.setMovements(this.movements(b))
+    this.doorController = new AbortController()
+    if (typeof b.activateBlock === 'function') {
+      const original = b.activateBlock
+      this.originalActivate = original.bind(b)
+      this.activateWrapper = async (block, ...rest) => {
+        if (!this.settings.doorAssist || !canHandOpen(block) || /_trapdoor$/.test(block.name)) return original.call(b, block, ...rest)
+        if (this.pendingDoor) return this.pendingDoor
+        const door = doorBase(b, block), key = door.position.toString()
+        const signal = this.host.abortSignal ? AbortSignal.any([this.host.abortSignal, this.doorController.signal]) : this.doorController.signal
+        const operation = setDoorState(b, door, true, { signal, activate: original.bind(b) })
+        this.pendingDoor = operation
+        try { return await operation }
+        catch (e) {
+          if (!signal.aborted) {
+            this.blockedDoors.set(key, Date.now() + 10000)
+            if (this.blockedDoors.size > 64) this.blockedDoors.delete(this.blockedDoors.keys().next().value)
+            this.host.emit('system', { text: `开门受阻 ${key}：${e.message}` })
+            // Stop upstream's asynchronous useOne retry loop when the server rejects a door.
+            b.pathfinder.setGoal(null)
+            this.followState.phase = 'blocked'
+            this.followState.targetPosition = this.findPlayer(this.follow)?.position?.clone()
+          }
+          throw e
+        } finally { if (this.pendingDoor === operation) this.pendingDoor = null }
+      }
+      b.activateBlock = this.activateWrapper
+    }
     b.pathfinder.tickTimeout = Math.min(b.pathfinder.tickTimeout ?? 5, 5)
     b.pathfinder.thinkTimeout = Math.min(b.pathfinder.thinkTimeout ?? 2000, 2000)
-    if (b.collectBlock.movements) protectMovementsFromFluid(b, b.collectBlock.movements)
+    b.collectBlock.movements = this.movements(b)
     b.on('physicsTick', this.tick)
     b.on('respawn', this.onRespawn)
     return b
   }
 
   release(bot = this.raw, closeWindow = false) {
+    this.doorController?.abort('路径已停止')
+    this.doorController = new AbortController()
     try { bot?.pathfinder?.setGoal(null) } catch {}
     try { bot?.collectBlock?.targets?.clear() } catch {}
     try { bot?.stopDigging?.() } catch {}
     try { bot?.deactivateItem?.() } catch {}
-    if (closeWindow) { try { bot?.closeWindow?.(bot.currentWindow) } catch {} }
+    if (closeWindow && bot?.currentWindow) {
+      try {
+        const window = bot.currentWindow
+        const closing = window.close ? window.close() : bot.closeWindow?.(window)
+        void Promise.resolve(closing).catch(e => this.host.log('关闭游戏界面：', e.message))
+      } catch (e) { this.host.log('关闭游戏界面：', e.message) }
+    }
     try { bot?.clearControlStates?.() } catch {}
   }
   halt(reason = '停止当前动作') {
@@ -106,11 +149,18 @@ export class SurvivalSkills {
     this.followState.phase = 'inactive'
     this.goals.cancel(reason)
     this.active?.controller.abort(reason)
+    this.doorController?.abort(reason)
+    this.doorController = new AbortController()
     this.release(this.raw, true)
     return this.status()
   }
   detach(reason) {
     this.halt(reason)
+    this.doorController?.abort(reason)
+    if (this.raw?.activateBlock === this.activateWrapper && this.originalActivate) this.raw.activateBlock = this.originalActivate
+    this.originalActivate = null; this.activateWrapper = null; this.blockedDoors.clear()
+    this.pendingDoor = null; this.pendingCalls.clear()
+    this.movementCache = null
     this.raw?.off?.('physicsTick', this.tick)
     this.raw?.off?.('respawn', this.onRespawn)
     this.raw = null
@@ -122,7 +172,7 @@ export class SurvivalSkills {
     return {
       online: this.host.online, active: this.active?.label ?? null,
       position: position(this.raw?.entity?.position),
-      follow: this.follow ? { player: this.follow, visible: Boolean(target), distance: distance === null ? null : Number(distance.toFixed(2)), verifiedNearby: distance !== null && distance <= this.settings.followDistance + 0.5, suspended: this.busy || this.paused || this.goals.running, phase: this.followState.phase, recoveryAttempts: this.followState.attempts } : null,
+      follow: this.follow ? { player: this.follow, visible: Boolean(target), distance: distance === null ? null : Number(distance.toFixed(2)), verifiedNearby: playerInReach(this.raw, target, this.settings.followDistance + 0.5), unobstructed: target ? playerInReach(this.raw, target, Infinity) : false, suspended: this.busy || this.paused || this.goals.running, phase: this.followState.phase, recoveryAttempts: this.followState.attempts } : null,
       settings: { ...this.settings }, paused: this.paused,
       lastResult: this.lastResult, pathfinding: 'A* / 5ms search slices',
       waitingForCancelledAction: Boolean(this.quarantine),
@@ -130,25 +180,47 @@ export class SurvivalSkills {
     }
   }
   configure(values = {}) {
-    for (const key of ['autoEat', 'autoSurface', 'autoRetreat', 'autoDefend']) if (values[key] !== undefined) {
+    for (const key of ['autoEat', 'autoSurface', 'autoRetreat', 'autoDefend', 'autoEquip', 'doorAssist']) if (values[key] !== undefined) {
       if (typeof values[key] !== 'boolean') throw new Error(`${key} 必须是布尔值`)
       this.settings[key] = values[key]
     }
-    if (values.foodThreshold !== undefined) this.settings.foodThreshold = boundedInteger(values.foodThreshold, 6, 1, 18, 'foodThreshold')
+    if (values.foodThreshold !== undefined) this.settings.foodThreshold = boundedInteger(values.foodThreshold, 12, 1, 18, 'foodThreshold')
     if (values.oxygenThreshold !== undefined) this.settings.oxygenThreshold = boundedInteger(values.oxygenThreshold, 10, 1, 18, 'oxygenThreshold')
     if (values.healthThreshold !== undefined) this.settings.healthThreshold = boundedInteger(values.healthThreshold, 6, 1, 18, 'healthThreshold')
     if (values.followDistance !== undefined) this.settings.followDistance = boundedInteger(values.followDistance, 2, 1, 6, 'followDistance')
     this.paused = false
+    if (values.doorAssist !== undefined && this.raw?.pathfinder && !this.busy) { this.raw.pathfinder.setMovements(this.movements(this.raw)); this.release(this.raw); this.restoreFollow() }
     return this.status()
   }
+  movements(bot = this.raw) {
+    if (this.movementCache?.bot !== bot || this.movementCache?.doors !== this.settings.doorAssist) {
+      this.movementCache = { bot, doors: this.settings.doorAssist, value: playerMovements(bot, { doors: this.settings.doorAssist, blocked: this.blockedDoors }) }
+    }
+    const value = this.movementCache.value
+    value.canDig = false; value.allow1by1towers = false; value.allowParkour = false; value.allowSprinting = true
+    return value
+  }
+  container(args, signal) { return containerAction(this, args, signal) }
+  equipment(args, signal) { return equipmentAction(this, args, signal) }
+  interact(args, signal) { return interactAction(this, args, signal) }
+  useItem(args, signal) { return itemAction(this, args, signal) }
+  player(args, signal) { return playerAction(this, args, signal) }
+  farm(args, signal) { return farmAction(this, args, signal) }
+  trade(args, signal) { return tradeAction(this, args, signal) }
+  station(args, signal) { return stationAction(this, args, signal) }
+  controls(args, signal) { return controlsAction(this, args, signal) }
   async guarded(promise, signal, ms = 10000, cancel) {
     check(signal)
     const body = this.raw
+    const tracked = { body, promise: Promise.resolve(promise), settled: false }
+    this.pendingCalls.add(tracked)
+    const settle = () => { tracked.settled = true; this.pendingCalls.delete(tracked) }
+    void tracked.promise.then(settle, settle)
     cancel ??= () => this.release(body, true)
     let timer
     try {
       return await Promise.race([
-        runAbortableOperation(promise, signal, cancel),
+        runAbortableOperation(tracked.promise, signal, cancel),
         new Promise((_, reject) => { timer = setTimeout(() => { cancel(); reject(Object.assign(new Error(`游戏操作超时（${ms}ms）`), { mcTimeout: true })) }, ms) }),
       ])
     } finally { clearTimeout(timer) }
@@ -171,7 +243,8 @@ export class SurvivalSkills {
     const onAbort = () => this.release(b, true)
     combined.addEventListener('abort', onAbort, { once: true })
     let settled = false
-    const task = Promise.resolve().then(() => { check(combined); return fn(combined, b) })
+    const pendingDoor = this.pendingDoor
+    const task = Promise.resolve().then(async () => { await pendingDoor?.catch(() => {}); check(combined); return fn(combined, b) })
     void task.then(() => { settled = true }, () => { settled = true })
     try {
       const result = await runAbortableOperation(task, combined, onAbort)
@@ -191,10 +264,17 @@ export class SurvivalSkills {
         let cleanupTimer
         await Promise.race([task.catch(() => {}), new Promise(resolve => { cleanupTimer = setTimeout(resolve, 250) })])
         clearTimeout(cleanupTimer)
-        if (!settled && this.raw === b) {
-          this.quarantine = operation
-          void task.finally(() => { if (this.quarantine === operation) this.quarantine = null }).catch(() => {})
-        }
+      }
+      const outstanding = [...this.pendingCalls].filter(c => c.body === b && !c.settled)
+      if ((!settled || outstanding.length) && this.raw === b) {
+        this.quarantine = operation
+        void Promise.allSettled([task, ...outstanding.map(c => c.promise)]).then(() => {
+          if (this.quarantine === operation && this.raw === b) {
+            this.quarantine = null
+            this.release(b, true)
+            this.restoreFollow()
+          }
+        })
       }
       this.host.setAbortSignal(oldSignal)
       if (this.active === operation) this.active = null
@@ -211,14 +291,10 @@ export class SurvivalSkills {
     if (!this.follow || this.busy || this.quarantine || this.paused || this.goals.running || !this.host.online || !this.raw?.pathfinder) return
     const target = this.findPlayer(this.follow)
     if (target) {
-      const distance = this.raw.entity.position.distanceTo(target.position)
-      if (distance <= this.settings.followDistance) { this.followState.phase = 'nearby'; return }
-      const movements = protectMovementsFromFluid(this.raw, new Movements(this.raw))
-      movements.canDig = false
-      movements.allow1by1towers = false
-      this.raw.pathfinder.setMovements(movements)
+      if (playerInReach(this.raw, target, this.settings.followDistance)) { this.followState.phase = 'nearby'; return }
+      this.raw.pathfinder.setMovements(this.movements(this.raw))
       this.host._selfMovingAt = Date.now()
-      this.raw.pathfinder.setGoal(new goals.GoalFollow(target, this.settings.followDistance), true)
+      this.raw.pathfinder.setGoal(new PlayerFollowGoal(this.raw, target, this.settings.followDistance), true)
       this.followState.phase = 'following'
       this.followState.lastProgressAt = Date.now()
       this.followState.position = this.raw.entity.position.clone()
@@ -247,15 +323,14 @@ export class SurvivalSkills {
       const target = args.who ? this.findPlayer(String(args.who))?.position : args
       if (!target || !['x', 'y', 'z'].every(k => Number.isFinite(Number(target[k])))) throw new Error('需要有效坐标，或附近可见玩家 who')
       const range = boundedInteger(args.range, 2, 1, 8, 'range')
-      b.pathfinder.setMovements(protectMovementsFromFluid(b, new Movements(b)))
-      b.pathfinder.movements.canDig = false
-      b.pathfinder.movements.allow1by1towers = false
+      b.pathfinder.setMovements(this.movements(b))
       this.host._selfMovingAt = Date.now()
-      const result = await this.guarded(patchedGoto(b, new goals.GoalNear(Number(target.x), Number(target.y), Number(target.z), range), { signal }), signal, budgetMs)
+      const goal = args.who ? new PlayerNearGoal(b, new Vec3(Number(target.x), Number(target.y), Number(target.z)), range) : new goals.GoalNear(Number(target.x), Number(target.y), Number(target.z), range)
+      const result = await this.guarded(patchedGoto(b, goal, { signal }), signal, budgetMs)
       const currentTarget = args.who ? this.findPlayer(String(args.who))?.position : target
       const actual = b.entity.position
       const distance = currentTarget ? actual.distanceTo(new Vec3(Number(currentTarget.x), Number(currentTarget.y), Number(currentTarget.z))) : null
-      const arrived = Boolean(result.ok && distance !== null && distance <= range + 0.5)
+      const arrived = Boolean(result.ok && distance !== null && distance <= range + 0.5 && (!args.who || playerInReach(b, this.findPlayer(String(args.who)), range + 0.5)))
       return { ...result, ok: arrived, arrived, ms: Date.now() - startedAt, position: position(actual), target: currentTarget ? position(currentTarget) : null, player: args.who ?? null, remaining: distance === null ? null : Number(distance.toFixed(2)), confirmed: arrived, outcome: arrived ? 'succeeded' : 'partial', reason: arrived ? null : !currentTarget ? '目标玩家已不可见' : result.reason ?? '实际位置尚未接近当前目标' }
   }
 
@@ -333,9 +408,12 @@ export class SurvivalSkills {
     })
   }
   async approach(b, block, signal) {
-    if (b.entity.position.distanceTo(block.position) <= 3.5) return
-    const result = await this.guarded(patchedGoto(b, new goals.GoalNear(block.position.x, block.position.y, block.position.z, 2), { signal }), signal, 20000)
-    if (!result.ok) throw new Error(`无法到达 ${block.name}：${result.reason}`)
+    const reachable = () => b.entity.position.distanceTo(block.position.offset(0.5, 0.5, 0.5)) <= 4
+      && lineOfSight(b, b.entity.position.offset(0, 1.5, 0), block.position.offset(0.5, 0.5, 0.5), block.position)
+    if (reachable()) return
+    b.pathfinder.setMovements(this.movements(b))
+    const result = await this.guarded(patchedGoto(b, new InteractionGoal(b, block), { signal }), signal, 20000)
+    if (!result.ok || !reachable()) throw new Error(`无法到达 ${block.name}：${result.reason ?? '交互位置被障碍遮挡'}`)
   }
   async craft(args, signal) {
     const plan = await this.craftPlan(args, signal)
@@ -474,9 +552,7 @@ export class SurvivalSkills {
         if (destination) break
       }
       if (!destination) return { outcome: 'partial', reason: '附近没有已知安全撤退落脚点' }
-      b.pathfinder.setMovements(protectMovementsFromFluid(b, new Movements(b)))
-      b.pathfinder.movements.canDig = false
-      b.pathfinder.movements.allow1by1towers = false
+      b.pathfinder.setMovements(this.movements(b))
       this.host._selfMovingAt = Date.now()
       const result = await this.guarded(patchedGoto(b, new goals.GoalNear(destination.x, destination.y, destination.z, 1), { signal: s }), s, 8000)
       return { ...result, outcome: result.ok ? 'succeeded' : 'partial' }
@@ -488,15 +564,14 @@ export class SurvivalSkills {
     const desired = args.entity ? String(args.entity) : undefined
     if (desired && !HOSTILES.has(desired)) throw new Error('本地战斗只支持敌对生物，不攻击玩家或中立动物')
     return this.run('本地 PvE 战斗', signal, async (s, b) => {
-      const movements = protectMovementsFromFluid(b, new Movements(b))
-      movements.canDig = false
-      movements.allow1by1towers = false
-      b.pathfinder.setMovements(movements)
+      b.pathfinder.setMovements(this.movements(b))
+      if (this.settings.autoEquip) await equipBestBody(this, b, s)
       const weapons = ['netherite_sword', 'diamond_sword', 'iron_sword', 'stone_sword', 'golden_sword', 'wooden_sword', 'netherite_axe', 'diamond_axe', 'iron_axe']
       const weapon = weapons.map(name => b.inventory.items().find(item => item.name === name)).find(Boolean)
       if (weapon) await this.guarded(b.equip(weapon, 'hand'), s, 6000)
       const deadline = Date.now() + budget - 200
-      let hits = 0, lastAttack = 0
+      let hits = 0, lastAttack = 0, blocking = false
+      const shield = b.inventory.slots?.[45]?.name === 'shield'
       while (Date.now() < deadline) {
         check(s)
         if ((b.health ?? 20) <= this.settings.healthThreshold) return { outcome: 'partial', hits, reason: '血量过低，已停止追击，交由撤退控制处理' }
@@ -510,7 +585,10 @@ export class SurvivalSkills {
         } else if (this.visible(enemy)) {
           if (b.pathfinder.goal) b.pathfinder.setGoal(null)
           if (typeof b.lookAt === 'function') await this.guarded(b.lookAt(enemy.position.offset(0, 1, 0), false), s, 1500)
-          if (Date.now() - lastAttack >= (weapon?.name.endsWith('_axe') ? 1100 : 650)) { b.attack(enemy); lastAttack = Date.now(); hits++ }
+          if (Date.now() - lastAttack >= (weapon?.name.endsWith('_axe') ? 1100 : 650)) {
+            if (blocking) { b.deactivateItem(); blocking = false; await delay(150, s) }
+            b.attack(enemy); lastAttack = Date.now(); hits++
+          } else if (shield && !blocking) { b.activateItem(true); blocking = true }
         }
         await delay(100, s)
       }
@@ -523,12 +601,12 @@ export class SurvivalSkills {
     const b = this.raw, target = this.findPlayer(this.follow), state = this.followState
     if (!target) { if (state.phase !== 'waiting') this.release(b); state.phase = 'waiting'; return }
     const distance = b.entity.position.distanceTo(target.position), stopDistance = this.settings.followDistance
-    if (distance <= stopDistance) {
+    if (playerInReach(b, target, stopDistance)) {
       if (state.phase !== 'nearby') this.release(b)
       state.phase = 'nearby'; state.attempts = 0; state.lastProgressAt = now
       return
     }
-    if (state.phase === 'nearby' && distance < stopDistance + 1.2) return
+    if (state.phase === 'nearby' && playerInReach(b, target, stopDistance + 1.2)) return
     if (state.phase === 'blocked') {
       if (state.targetPosition && state.targetPosition.distanceTo(target.position) < 2) return
       state.attempts = 0
@@ -549,11 +627,11 @@ export class SurvivalSkills {
   }
   onTick() {
     const b = this.raw
-    if (!b || !this.host.online || this.paused || this.quarantine || this.pendingReflex || (b.health ?? 20) <= 0) return
+    if (!b || !this.host.online || this.paused || this.quarantine || this.pendingReflex || b.isSleeping || (b.health ?? 20) <= 0) return
     const now = Date.now()
     if (now >= this.reflexUntil) {
       const lowOxygen = this.settings.autoSurface && b.entity?.isInWater && (b.oxygenLevel ?? 20) <= this.settings.oxygenThreshold
-      const hungry = this.settings.autoEat && (b.food ?? 20) <= this.settings.foodThreshold && FOOD.some(name => b.inventory.items().some(item => item.name === name))
+      const hungry = this.settings.autoEat && ((b.food ?? 20) <= this.settings.foodThreshold || (b.health ?? 20) < 16 && (b.food ?? 20) < 18) && FOOD.some(name => b.inventory.items().some(item => item.name === name))
       const enemy = this.nearbyHostiles(8)[0]
       const threatened = enemy && (enemy.name === 'creeper' && b.entity.position.distanceTo(enemy.position) < 2.5 || (b.health ?? 20) <= this.settings.healthThreshold)
       const retreat = this.settings.autoRetreat && threatened
@@ -570,6 +648,15 @@ export class SurvivalSkills {
             if (this.goals.running && (retreat || lowOxygen && result?.outcome !== 'succeeded')) this.goals.suspend()
           })
           .catch(e => this.host.log('生存反应：', e.message))
+          .finally(() => { this.pendingReflex = false; this.restoreFollow() })
+        return
+      }
+    }
+    if (this.settings.autoEquip && !this.busy && !this.goals.running && now - this.lastEquipmentCheck > 1500) {
+      this.lastEquipmentCheck = now
+      if (equipmentPlan(b).length) {
+        this.pendingReflex = true
+        void this.equipment({ action: 'best' }).catch(e => this.host.log('自动装备：', e.message))
           .finally(() => { this.pendingReflex = false; this.restoreFollow() })
         return
       }

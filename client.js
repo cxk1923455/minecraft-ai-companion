@@ -1499,7 +1499,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
     /* ---------------------------------------------------------- 页 2：指令白名单 */
 
     function WhitelistPane(props) {
-      const { wlText, allowAll, commandsEnabled, busyKey, onWlText, onAllowAll, onCommandsEnabled, onSave } = props
+      const { wlText, allowAll, commandsEnabled, syncChatToGame, busyKey, onWlText, onAllowAll, onCommandsEnabled, onSyncChat, onSave } = props
       const busy = busyKey !== null
       const saveBusy = busyKey === 'wl:save'
       // 开关**一拨就存**（用户 2026-09-16 定）；下面那份白名单仍然要点「保存」
@@ -1509,6 +1509,11 @@ select[data-wc-in]{appearance:none;padding-right:22px;
         'div',
         { 'data-wc-pane-page': 'whitelist' },
         React.createElement('div', { 'data-wc-sec': '' },
+          React.createElement(Switch, {
+            label: '将 AI 最终回复同步到游戏聊天', disabled: busy,
+            on: syncChatToGame !== false, onToggle: onSyncChat,
+          }),
+          React.createElement('div', { 'data-wc-hint': '' }, '只同步当前 MC 会话的完整文字回复；较长回复分段发送。'),
           React.createElement(Switch, {
             label: '允许 AI 使用服务器指令',
             disabled: busy,
@@ -2056,6 +2061,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
       const [wlText, setWlText] = React.useState('')
       const [allowAll, setAllowAll] = React.useState(false)
       const [commandsEnabled, setCommandsEnabled] = React.useState(false)
+      const [syncChatToGame, setSyncChatToGame] = React.useState(true)
       const [mdText, setMdText] = React.useState('')
       const [mdSource, setMdSource] = React.useState('default')
       const [mdPath, setMdPath] = React.useState('')
@@ -2123,6 +2129,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
             setWlText(whitelistToText(c.commandWhitelist))
             setAllowAll(c.allowAllCommands === true)
             setCommandsEnabled(c.commandsEnabled === true)
+            setSyncChatToGame(c.syncChatToGame !== false)
             setInjectWc(c.injectWhaleCraftAgentsMd !== false)
             setInjectWs(c.injectWorkspaceAgentsMd === true)
             setShareOn(c.expressEnabled === true)
@@ -2240,6 +2247,12 @@ select[data-wc-in]{appearance:none;padding-right:22px;
         return run('cfg:commandsEnabled', () => apiPatch(withSid('/api/mc/config'), { commandsEnabled: value }), value ? '已允许服务器指令；仍受白名单限制' : '服务器指令已全部禁用')
           .then(ok => { if (!ok) setCommandsEnabled(previous); return ok })
       }, [run, commandsEnabled])
+      const toggleSyncChat = React.useCallback(next => {
+        const previous = syncChatToGame !== false, value = next === true
+        setSyncChatToGame(value)
+        return run('cfg:syncChat', () => apiPatch(withSid('/api/mc/config'), { syncChatToGame: value }), value ? '已开启游戏聊天同步' : '已关闭游戏聊天同步')
+          .then(ok => { if (!ok) setSyncChatToGame(previous); return ok })
+      }, [run, syncChatToGame])
 
       const toggleAllowAll = React.useCallback((next) => {
         const prev = allowAll === true
@@ -2343,7 +2356,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
 
       const pane = tab === 'whitelist'
         ? React.createElement(WhitelistPane, {
-          wlText, allowAll, commandsEnabled, busyKey,
+          wlText, allowAll, commandsEnabled, syncChatToGame, busyKey, onSyncChat: toggleSyncChat,
           onCommandsEnabled: toggleCommandsEnabled,
           onWlText: setWlText, onAllowAll: toggleAllowAll, onSave: saveWhitelist,
         })

@@ -60,10 +60,10 @@ test('each session keeps an independent body and survival settings', () => {
   assert.equal(a.raw.pathfinder.tickTimeout, 5)
 })
 
-test('all ten extension tools register synchronously with the host schema', () => {
+test('all player and survival extension tools register synchronously with the host schema', () => {
   const registered = new Map(), { host } = fixture()
   applyExtension({ ctx: { tools: { register: tool => registered.set(tool.name, tool) } }, asTool: defineTool, getSession: () => ({ bot: host }) })
-  assert.equal(registered.size, 10)
+  assert.equal(registered.size, 19)
   assert.ok(registered.has('mc_collect'))
   assert.ok(registered.has('mc_halt'))
 })
@@ -304,6 +304,7 @@ test('goal rejects duplicate blueprint positions before any world action', () =>
 
 test('blueprint skips completed cells and verifies the remaining world changes', async () => {
   const { raw, skills, host } = fixture({ oak_planks: 1 })
+  raw.entity.position = new Vec3(2, 64, 2) // Both unfinished cells are visible from this building position.
   const world = new Map([['1,64,0', 'oak_planks']])
   raw.blockAt = p => ({ name: world.get(`${p.x},${p.y},${p.z}`) ?? 'air', boundingBox: world.has(`${p.x},${p.y},${p.z}`) ? 'block' : 'empty', position: p })
   let placements = 0

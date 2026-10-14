@@ -113,6 +113,13 @@ export const DEFAULT_AGENTS_MD = `# Whale Craft 行事准则
 生存绕障碍移动使用 \`mc_pathfind\`；持续跟随玩家使用 \`mc_follow\`。
 只停止动作、保留连接使用 \`mc_halt\`；退出游戏仍使用原来的 \`mc_stop\` 或 \`mc_disconnect\`。
 \`mc_survival\` 查看当前动作与自动进食/缺氧上浮设置；\`mc_eat\` 主动进食。
+
+容器操作用 \`mc_container\`（inspect/withdraw/deposit/take_all），以重新打开后的真实服务端内容和背包增量验收。
+门、按钮、拉杆和实体用 \`mc_interact\`，木门、铜门和栅栏门支持自动开门寻路，铁门需红石。
+\`mc_equipment\` 自动装备或指定物品；\`mc_use_item\` 使用、交接或丢出真实物品。
+\`mc_player\` 支持主世界睡觉、起床、钓鱼和上下载具；\`mc_controls\` 支持有限时长的普通按键。
+\`mc_farm\` 只收成熟作物并默认补种；\`mc_trade\` 先查看真实价格再交易；\`mc_station\` 操作附魔台和铁砧。
+MC 模式最终回复默认自动同步到游戏聊天；避免再调用 \`mc_say\` 发送相同内容。服务端可能屏蔽聊天，sent 不代表他人已看到。
 一次只执行一个身体动作。partial/blocked/failed 结果必须重新观察或调整方案，不能声称任务完成。
 本地进食和上浮无需等模型；缺氧可能中断正在执行的动作，恢复后重新观察并规划。
 较长任务优先用 \`mc_goal\`：kind=craft 会补采缺料、制作工具与放置工作站，kind=build 会按蓝图备料并建造。

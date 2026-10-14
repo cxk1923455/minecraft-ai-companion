@@ -54,6 +54,8 @@ export function resolveStateDir ({ env = process.env, dshHomePath, whaleDir, hom
 export const DEFAULT_CONFIG = {
   /** Master must explicitly enable commands; whitelist alone never enables them. */
   commandsEnabled: false,
+  /** Mirror only completed MC assistant replies into game chat. */
+  syncChatToGame: true,
   /**
    * mc_command 允许的服务器指令名。支持三种写法：
    * 精确名（`"tp"`）· 正则（斜杠包裹，如 `^gi.+`）· `"*"` = 全部放行
@@ -652,7 +654,7 @@ function validate (top, rest, value) {
     if (value !== null && typeof value !== 'string') throw new Error('memoryDir 必须是字符串（绝对路径）或 null')
     return
   }
-  if (top === 'commandsEnabled' || top === 'allowAllCommands' || top === 'ensureMcPreset' || top === 'expressEnabled' || top === 'exposeDebugTools') {
+  if (top === 'commandsEnabled' || top === 'syncChatToGame' || top === 'allowAllCommands' || top === 'ensureMcPreset' || top === 'expressEnabled' || top === 'exposeDebugTools') {
     if (typeof value !== 'boolean') throw new Error(`${top} 必须是 true/false`)
     return
   }

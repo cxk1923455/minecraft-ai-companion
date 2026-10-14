@@ -24,7 +24,8 @@
 # Whale Craft / 鲸鱼工艺
 
 > 本目录是基于用户提供的 `0.2.0-beta.2` 制作的本地 Hiyori 增强版
-> `0.2.0-beta.2.hiyori.4`。新增生存寻路、平稳跟随、采集、合成、熔炼、后台目标和本地 PvE 生存反应。
+> `0.2.0-beta.2.hiyori.5`。包含生存寻路、跟随、采集合成、容器取放、门的通行、游戏聊天同步，以及装备、防御、农务、交易和工作站操作。
+> 具体能力、用法与实测边界见 [玩家能力说明](PLAYER-CAPABILITIES.md)。当前共有 51 个原生工具；增强版没有发布到公共 npm。
 > 安装与新增工具说明见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。下文保留原版说明。
 
 **[English ↓](#english)** · 中文 · [![CI](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml/badge.svg)](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml)
@@ -77,15 +78,16 @@
 >
 > 无论你从何种方式安装本插件，安装完成后，为保证所有功能正常，务必完全重启DSH实例。
 
-对你的 AI 说：`帮我安装插件 npm:whale_craft@^0.2.0-beta.2`
+从 [增强版发布页](https://github.com/cxk1923455/minecraft-ai-companion/releases) 下载当前版本，或从本仓库安装。公共 npm 上的 `whale_craft` 仍是原版。
 
 ### DSH 插件管理
 
-在 DSH 主界面找到“插件”，点击打开插件页面，点击“添加插件”按钮，在输入框中输入 `whale_craft@^0.2.0-beta.2`，点击安装。
+在 DSH 主界面打开“插件”→“添加插件”，输入本仓库地址 `https://github.com/cxk1923455/minecraft-ai-companion`。私有仓库需要 GitHub 访问权限。
+如果 Git 仓库安装卡住，可以下载 ZIP，按 [本地安装步骤](HIYORI-INTEGRATION.md) 通过 `link:` 安装。
 
 ### 手动安装
 
-本插件的 github 地址为 https://github.com/yzi1b/whale-craft ，npm 包名为 `whale_craft`。
+增强版仓库为 https://github.com/cxk1923455/minecraft-ai-companion ，包名仍为 `whale_craft`，与原版同名替换，避免同时装两份。
 
 历史遗留原因，npm包名使用下划线，应当注意到仓库名和包名的不同，以免安装错误。
 
@@ -94,13 +96,13 @@
 从 github 仓库安装：
 
 ```bash
-dsh plugin --profile web add github:yzi1b/whale-craft
+dsh plugin --profile web add github:cxk1923455/minecraft-ai-companion
 ```
 
-从 npm 安装：
+从下载的增强版 `.tgz` 安装（按实际下载路径修改）：
 
 ```bash
-dsh plugin --profile web add whale_craft@^0.2.0-beta.2
+dsh plugin --profile desktop add 'file:C:/Downloads/whale_craft-0.2.0-beta.2.hiyori.5.tgz'
 ```
 
 别忘了重启DSH。

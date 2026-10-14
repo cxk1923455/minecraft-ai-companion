@@ -68,6 +68,16 @@ test('ordinary chat cannot bypass command permissions or hide a command behind w
   assert.deepEqual(raw.calls, ['你好'])
 })
 
+test('ordinary chat sanitizes illegal characters without hiding slash commands or splitting emoji', () => {
+  const { host, raw } = fixture()
+  assert.throws(() => host.chatSay('\u0000/tp TestBot Tester'), /普通聊天/)
+  assert.equal(host.chatSay('§a你好\u0000世界'), '你好 世界')
+  const sent = host.chatSay('a' + '😀'.repeat(110))
+  assert.equal(sent.length, 219)
+  assert.ok(!/[\uD800-\uDBFF]$/.test(sent))
+  assert.equal(raw.calls.length, 2)
+})
+
 test('sequence treats an unfinished movement as failure and does not run subsequent steps', async () => {
   const {host,raw} = fixture()
   host.walkTo = async () => ({arrived:false,remaining:8})
@@ -136,6 +146,19 @@ test('interleaved chat duplicates and self messages do not cause extra wakes', (
   raw.emit('whisper','Tester','private')
   raw.emit('chat','TestBot','self')
   assert.deepEqual(chats.map(x=>x.text), ['hello','hi','private'])
+})
+
+test('raw modern chat without a name uses UUID and cannot generate unknown self-chat wakes', () => {
+  const { host, raw } = fixture()
+  raw.players.Tester.username = 'Tester'; raw.players.Tester.uuid = '11111111-1111-1111-1111-111111111111'
+  raw._client.uuid = '22222222-2222-2222-2222-222222222222'
+  host.wireChatEvents(raw)
+  const chats = []; host.on('chat', e => chats.push(e))
+  raw._client.emit('player_chat', { sender: raw.players.Tester.uuid, plainMessage: '进来' })
+  raw.emit('chat', 'Tester', '进来')
+  raw._client.emit('player_chat', { sender: raw._client.uuid, plainMessage: '我来了' })
+  raw._client.emit('player_chat', { plainMessage: '我来了' })
+  assert.deepEqual(chats, [{ who: 'Tester', text: '进来' }])
 })
 
 test('local fast path only recognizes complete movement requests, not negations or conversation', () => {

@@ -1078,12 +1078,18 @@ export class McBot extends EventEmitter {
    * @param {object} b mineflayer bot（`on` + `_client`）
    */
   wireChatEvents (b) {
-    b.on('message', (msg, position) => {
+    const senderName = uuid => {
+      if (!uuid) return null
+      const id = String(uuid).replace(/-/g, '').toLowerCase()
+      if (id === String(b.player?.uuid ?? b._client?.uuid ?? '').replace(/-/g, '').toLowerCase()) return b.username
+      return Object.values(b.players ?? {}).find(p => String(p.uuid ?? '').replace(/-/g, '').toLowerCase() === id)?.username ?? null
+    }
+    b.on('message', (msg, position, sender) => {
       const text = this.#plain(msg)
       if (position !== 'game_info') {                    // 动作栏除外，其余都按内容再判一次
         const parsed = this.#playerChatFrom(msg, text)
         if (parsed) {
-          this.#emitPlayerChat(parsed.who, parsed.text, b.username)
+          this.#emitPlayerChat(senderName(sender) ?? parsed.who, parsed.text, b.username)
           return
         }
       }
@@ -1093,9 +1099,9 @@ export class McBot extends EventEmitter {
     b._client?.on?.('player_chat', (p) => {
       let sender = p?.senderName ?? p?.networkName?.value ?? p?.networkName ?? '?'
       try { if (typeof sender === 'string' && sender.startsWith('{')) sender = JSON.parse(sender) } catch {}
-      const who = typeof sender === 'object' ? String(sender?.text ?? sender?.value ?? '?') : String(sender)
+      const who = senderName(p?.sender ?? p?.senderUuid) ?? (typeof sender === 'object' ? String(sender?.text ?? sender?.value ?? '?') : String(sender))
       const text = p?.plainMessage ?? ''
-      this.#emitPlayerChat(who, text, b.username)
+      if (who && who !== '?') this.#emitPlayerChat(who, text, b.username)
     })
     // Mineflayer normalizes legacy, signed and server-formatted chat patterns.
     for (const event of ['chat', 'whisper']) b.on(event, (who, text) => this.#emitPlayerChat(who, text, b.username))
@@ -1126,7 +1132,7 @@ export class McBot extends EventEmitter {
     this.#pushChat('player', w, t)
     this.stats.chats++
     this.stats.lastEventAt = now
-    if (w !== selfName) this.emit('chat', { who: w, text: t })
+    if (w.toLowerCase() !== String(selfName).toLowerCase()) this.emit('chat', { who: w, text: t })
   }
 
   /**
@@ -1565,10 +1571,12 @@ export class McBot extends EventEmitter {
 
   chatSay (text) {
     const b = this.requireBot()
-    const t = String(text).replace(/[\r\n]+/g, ' ').trim().slice(0, 220)
+    let t = String(text).replace(/§[0-9a-fk-or]/gi, '').replace(/[\u0000-\u001f\u007f§]/g, ' ').trim().slice(0, 220)
+    if (/[\uD800-\uDBFF]$/.test(t)) t = t.slice(0, -1)
     if (t.startsWith('/')) throw new Error('mc_say 只允许普通聊天，不能发送服务器指令。')
     b.chat(t)
     this.#pushChat('self', b.username, t)
+    this.emit('chatSent', { text: t, at: Date.now() })
     return t
   }
 

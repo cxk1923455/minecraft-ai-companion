@@ -53,6 +53,7 @@ import { buildConnectPrompt } from './src/connect-prompt.mjs'
 import { waitForEvents } from './src/wait.mjs'
 import { apply as applyHiyoriSkills } from './extensions/hiyori-survival.mjs'
 import { runtimeState } from './src/runtime-state.mjs'
+import { ChatBridge } from './src/chat-bridge.mjs'
 
 export const name = 'whale_craft'
 export const inject = ['webServer', 'tools']
@@ -166,6 +167,7 @@ class McSession {
     // 🔴 lockDir = 插件的家（`$DSH_HOME/whale_craft/`）：**别把锁文件写进插件包目录**
     //    （装进 node_modules 后可能是只读的，升级时也会被覆盖）——与日志同一条理由。
     this.bot = new McBot({ instanceId: agentId, ...(lockDir ? { lockDir } : {}) })
+    this.chatBridge = new ChatBridge(this.bot)
     this.mode = 'standby'           // standby / active / sleep
     this.events = []                // 未消费的 MC 事件
     this.maxEvents = 200
@@ -210,6 +212,7 @@ class McSession {
   /* ── 清理 ── */
 
   destroy() {
+    this.chatBridge.destroy()
     try { this.watchdog?.disarm('会话结束') } catch {}
     try { this.bot.disconnect('会话结束') } catch {}
     this.watchdog = null
@@ -912,6 +915,7 @@ export function apply(ctx, rawConfig) {
       hasWorkspace,
       workspaceName: hasWorkspace ? workspaceTitleOfCwd(cwd) : null,
       commandWhitelist: pluginConfig.get('commandWhitelist'),
+      syncChatToGame: pluginConfig.get('syncChatToGame'),
       commandsEnabled: pluginConfig.get('commandsEnabled'),
       allowAllCommands: pluginConfig.get('allowAllCommands'),
       injectWhaleCraftAgentsMd: ws ? ws.injectWhaleCraftAgentsMd : null,
@@ -1132,7 +1136,7 @@ export function apply(ctx, rawConfig) {
       const cwd = await cwdOf(body)
       if (cwd) ensureMemoryRootForCwd(cwd)
       // 全局键 → PluginConfig（**无条件**）；三个提示词开关 → **本工作区**的 config.json（有工作区才写）
-      for (const k of ['commandWhitelist', 'commandsEnabled', 'allowAllCommands', 'expressEnabled', 'expressBase', 'exposeDebugTools']) {
+      for (const k of ['commandWhitelist', 'commandsEnabled', 'allowAllCommands', 'syncChatToGame', 'expressEnabled', 'expressBase', 'exposeDebugTools']) {
         if (body[k] !== undefined) pluginConfig.set(k, body[k])
       }
       // 调试开关变更 → 立即重算各 MC/MC+ 会话的工具可见性（用户 2026-10-05）
@@ -1763,6 +1767,7 @@ export function apply(ctx, rawConfig) {
     const s = sess.bot.status()
     const base = {
       online: s.online,
+      chatSync: { enabled: pluginConfig.get('syncChatToGame') !== false, ...sess.chatBridge.status() },
       connection: s.connection,        // { host, port, version }
       lastError: s.lastError ?? null,
       ...(s.reconnecting ? { reconnecting: true } : {}),
@@ -1978,7 +1983,7 @@ export function apply(ctx, rawConfig) {
 
   ctx.tools.register(asTool({
     name: 'mc_say',
-    description: '在 MC 公屏说话（游戏里所有玩家能看到）。',
+    description: '向 MC 公屏立即发送普通聊天。MC 模式最终文字回复默认自动同步到游戏，通常无需重复调用。不能发送服务器指令。sent 仅代表已发送。',
     parameters: { message: { type: 'string', required: true, description: '要说的话（单行，会被截断到 220 字）' } },
     output: text(),
     async execute(args, exec) {
@@ -2090,6 +2095,7 @@ export function apply(ctx, rawConfig) {
         config: {
           file: pluginConfig.file,
           keys: Object.keys(DEFAULT_CONFIG),
+          syncChatToGame: pluginConfig.get('syncChatToGame'),
           commandWhitelist: pluginConfig.get('commandWhitelist'),
           commandsEnabled: pluginConfig.get('commandsEnabled'),
           allowAllCommands: pluginConfig.get('allowAllCommands'),
@@ -4102,6 +4108,7 @@ export function apply(ctx, rawConfig) {
    */
   const liftMcModePolicy = (agent) => {
     if (!agent) return
+    if (agent.id) registry.peek(String(agent.id))?.chatBridge?.clear()
     const was = mcPolicyKind.get(agent)
     if (was === 'other') return
     // 这个会话已经不是 MC 模式了 → "因没选工作区被拒绝"的旧标记也一起清掉
@@ -4238,6 +4245,14 @@ export function apply(ctx, rawConfig) {
   //    ② 不是就**切到"非 MC"档**（liftMcModePolicy —— 释放旧限制 + 把 mc/mckit 摘出可见面）。
   ctx.effect(() => {
     const handlers = []
+    handlers.push(ctx.on('session/event', (session, event) => {
+      if (!['assistant/message', 'turn/end'].includes(event?.type)) return
+      const sess = registry.peek(String(session?.id ?? ''))
+      if (!sess) return
+      sess.chatBridge.allowed = () => pluginConfig.get('syncChatToGame') !== false
+        && isMcModeAgent(safeAgentById(sess.agentId) ?? sess.watchdog?.agent)
+      try { sess.chatBridge.observe(event) } catch (e) { logLine(`游戏聊天同步：${e.message}`) }
+    }))
     const touch = (agent) => {
       if (!agent?.ctx) return
       // ⚠️ 这里**不再**建 `.whale-craft/` —— 建文件只发生在"首次发起 MC 模式会话"
