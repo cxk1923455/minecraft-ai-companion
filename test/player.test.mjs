@@ -179,8 +179,9 @@ test('manual close and open are idempotent and use observed server block updates
 test('a server-rejected door fails with a reason and removes its block-update listener', async () => {
   const f = fixture(), p = new Vec3(1, 64, 0), closed = block('oak_door', p, { facing: 'east', half: 'lower', hinge: 'left', open: false, powered: false })
   f.world.set(p.toString(), closed)
+  const listenersBefore = f.raw.listenerCount('blockUpdate')
   await assert.rejects(setDoorState(f.raw, closed, true, { activate: async () => {}, timeoutMs: 20 }), /服务器确认/)
-  assert.equal(f.raw.listenerCount('blockUpdate'), 0)
+  assert.equal(f.raw.listenerCount('blockUpdate'), listenersBefore)
 })
 test('a nearby player behind a wall is not verifiedNearby or an acceptable follow endpoint', () => {
   const f = fixture(), target = { position: new Vec3(2.5, 64, 0.5) }

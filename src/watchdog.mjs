@@ -53,6 +53,7 @@
 
 import { userMessage } from './user-message.mjs'
 import { localChatIntent } from './chat-intents.mjs'
+import { chooseConcreteResource, resourceRequest } from './agent-controller.mjs'
 
 /** 默认配置。括号里是"为什么默认这样"。 */
 export const WATCH_DEFAULTS = {  /** 进服自动挂载（用户要求：进游戏自动打开） */
@@ -404,6 +405,8 @@ export class Watchdog {
   #bind () {
     const bot = this.sess.bot
     const on = (evt, fn) => { bot.on(evt, fn); this._listeners.push([evt, fn]) }
+    on('goalProgress', event => this.#fire(['goalProgress'], { kind: 'task', text: `持续目标正在执行：${event.phase}。进度 ${JSON.stringify(event.progress)}。不要重新启动相同目标，也不能只检查附近后放弃。` }))
+    on('goalResult', event => this.#fire(['goalResult'], { kind: 'task', text: `持续目标结算：${JSON.stringify(event)}。只按实际库存、路径或交接证据回答；失败要说明具体障碍，不能泛称“插件能力弱”。` }))
 
     /**
      * 🔴 断线（2026-09-19 用户："连接断开了状态没有同步，AI 也以为连接还在"）。
@@ -492,10 +495,20 @@ export class Watchdog {
     const skills = this.sess?.bot?.skills
     if (!this.config.localChatControl || !skills || !this.sess.bot.online) return null
     try { if (this.gate && this.gate() === false) return null } catch { return null }
-    const intent = localChatIntent(text, this.config.mentionPatterns)
+    const request = resourceRequest(text, this.config.mentionPatterns)
+    const intent = localChatIntent(text, this.config.mentionPatterns) ?? (request ? 'resource' : null)
     if (!intent || !/^[A-Za-z0-9_]{1,16}$/.test(String(who))) return null
     if (intent !== 'halt' && !Object.keys(skills.raw?.players ?? {}).some(name => name.toLowerCase() === who.toLowerCase())) return null
     if (intent === 'follow' && skills.follow?.toLowerCase() === who.toLowerCase() && !skills.paused) return '持续跟随已开启，距离以 mc_survival 为准'
+    if (intent === 'pause' || intent === 'resume') {
+      try { const result = skills.agent.act({ action: intent }); return `${intent === 'pause' ? '目标已暂停' : '原目标已继续'}：${JSON.stringify(result)}` }
+      catch (e) { return `操作未完成：${e.message}` }
+    }
+    if (intent === 'resource' && skills.goals.running) {
+      const current = skills.goals.job, item = chooseConcreteResource(skills.raw, request.item)
+      if (current.kind === 'collect' && current.item === item && current.count === request.count
+        && current.deliverTo === (request.deliver ? who : null) && current.useExisting === true) return '相同资源目标仍在执行，请查询 mc_agent status 查看探索/下矿进度，不重复启动'
+    }
     this.localAction?.controller.abort('玩家的新动作请求')
     skills.halt(`玩家 ${who} 请求 ${intent}`)
     if (intent === 'halt') { this.localAction = null; return '已停止身体动作与跟随，保留服务器连接' }
@@ -503,20 +516,23 @@ export class Watchdog {
     this.localAction = operation
     void (async () => {
       const until = Date.now() + 1500
-      while (skills.busy && Date.now() < until) {
+      while ((skills.busy || skills.goals.running || skills.quarantine) && Date.now() < until) {
         operation.controller.signal.throwIfAborted()
         await new Promise(resolve => setTimeout(resolve, 25))
       }
       operation.controller.signal.throwIfAborted()
       if (this.gate && this.gate() === false) throw new Error('会话已退出 MC 模式')
-      const result = intent === 'follow'
-        ? skills.setFollow(who)
-        : await skills.navigate({ who, range: skills.settings.followDistance }, operation.controller.signal)
+      const result = intent === 'resource'
+        ? skills.agent.act({ action: 'start', kind: 'gather', item: request.item, count: request.count, ...(request.deliver ? { deliverTo: who } : {}) })
+        : intent === 'enter'
+          ? skills.agent.act({ action: 'start', kind: 'enter', who, budgetMs: 120000 })
+          : intent === 'follow' ? skills.setFollow(who) : await skills.navigate({ who, range: skills.settings.followDistance }, operation.controller.signal)
       if (this.localAction === operation && this.armed) this.#fire(['localAction'], { kind: 'action', text: `本地 ${intent} 结果：${JSON.stringify(result)}。started 只代表启动，partial/blocked 不能报成功。` })
     })().catch(error => {
       if (this.localAction === operation && this.armed && !operation.controller.signal.aborted) this.#fire(['localAction'], { kind: 'action', text: `本地 ${intent} 未完成：${error.message}。请如实说明，不能声称已在玩家身边。` })
     }).finally(() => { if (this.localAction === operation) this.localAction = null })
-    return intent === 'follow' ? '正在启动持续跟随' : '正在寻路靠近发话玩家'
+    return intent === 'resource' ? `正在启动持续资源任务：${request.item} ×${request.count}，将准备工具、探索/下矿、验证并交接`
+      : intent === 'enter' ? '正在识别房间入口并进入，必须到玩家所在的一侧' : intent === 'follow' ? '正在启动持续跟随' : '正在寻路靠近发话玩家'
   }
 
   /* ─────────────── 事件处理 ─────────────── */
@@ -602,7 +618,7 @@ export class Watchdog {
     const body = `【MC 看门狗｜${allReasons.map((r) => LABEL[r] ?? r).join(' + ')}】\n`
       + lines.join('\n')
       + `\n\n（这是同一个对话里的提醒。用 mc_events 可取完整事件队列；`
-      + `需要回应就 mc_say，需要行动就 mc_move / mc_act / mc_build。）`
+      + `最终文字会自动同步游戏；持续资源目标用 mc_agent，进入房间用 mc_enter，移动用 mc_pathfind。已有后台目标时查询进度，不重复启动。）`
 
     this.#inject(body, allReasons.join('+'))
     this.lastWakeAt = now

@@ -2073,6 +2073,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
       const [pluginVersion, setPluginVersion] = React.useState('')
       // 版本内置提示词（随版本发布、只读）——**无工作区时也要显示**，来自 agents-md 顶层字段
       const [versionPrompt, setVersionPrompt] = React.useState(null)
+      const [runtime, setRuntime] = React.useState(null)
       // 「文件分享」：模式（off 关闭 / online 在线）+ base + 发布区现状
       const [shareOn, setShareOn] = React.useState(false)
       const [shareBase, setShareBase] = React.useState('')
@@ -2123,6 +2124,7 @@ select[data-wc-in]{appearance:none;padding-right:22px;
             setDefaultAccount(a.defaultAccount ?? null)
           }),
           apiGet(withSid('/api/mc/config')).then((c) => {
+            setRuntime(c.runtime ?? null)
             const hasWs = c.hasWorkspace === true
             setHasWorkspace(hasWs)
             setWorkspaceName(String(c.workspaceName ?? ''))
@@ -2453,6 +2455,10 @@ select[data-wc-in]{appearance:none;padding-right:22px;
             React.createElement(
               'div',
               { 'data-wc-pane': '' },
+              runtime ? React.createElement('div', { 'data-wc-dim': '', style: { marginBottom: '12px', fontSize: '12px' } },
+                `运行版本：${runtime.runningVersion} · 已安装：${runtime.installedVersion ?? '无法读取'}`) : null,
+              runtime?.restartRequired ? React.createElement('div', { 'data-wc-alert': '', role: 'alert' },
+                '插件已更新，后台仍在运行旧版。请保存内容，从“应用→退出”完全退出 DSH，再打开；右上角 X 会隐藏窗口。') : null,
               error ? React.createElement('div', { 'data-wc-alert': '', role: 'alert' }, error) : null,
               saved ? React.createElement('div', { 'data-wc-ok': '' }, saved) : null,
               loadError ? React.createElement('div', { 'data-wc-alert': '', role: 'alert' }, `读取失败：${loadError}`) : null,

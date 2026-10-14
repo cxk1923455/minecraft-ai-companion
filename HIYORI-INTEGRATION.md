@@ -1,6 +1,6 @@
 # Whale Craft 的 Hiyori Minecraft 功能移植
 
-本地增强版：`0.2.0-beta.2.hiyori.5`，基于你提供的 `whale_craft-0.2.0-beta.2.zip`。
+本地增强版：`0.2.0-beta.2.hiyori.6`，基于你提供的 `whale_craft-0.2.0-beta.2.zip`。
 
 保留 DSH 原生插件、每会话一个机器人、连接界面、离线/皮肤站账号、看门狗、记忆和原有建造工具。
 新技能使用当前会话已有的 Mineflayer 实例；不需要 Hiyori 桌面程序、Electron、语音服务或额外模型 API。
@@ -23,7 +23,7 @@ dsh plugin --profile desktop add 'link:D:/Minecraft/whale-craft-enhanced'
 Web profile 把 `desktop` 改为 `web`。上面的命令属于手动安装步骤，尚未替你执行。
 增强版也附有 npm `.tgz` 打包产物；本次没有发布到公共 npm。
 
-## 新增 19 个 AI 工具
+## 新增 21 个 AI 工具
 
 | 工具 | 功能 |
 | --- | --- |
@@ -46,6 +46,8 @@ Web profile 把 `desktop` 改为 `web`。上面的命令属于手动安装步骤
 | `mc_station` | 附魔预览与执行、铁砧重命名/合并，验证并返还物品 |
 | `mc_controls` | 短时走动、跳跃、蹲行、游泳、冲刺，到时释放 |
 | `mc_goal` | 后台采集/制作/蓝图建造/附近探索目标，支持查询、暂停、继续、取消与指定玩家交接 |
+| `mc_agent` | 接受完整目标，检查库存、准备工具、探索/下矿、执行、验证和有限恢复；相同目标复用 |
+| `mc_enter` | 走向房间内玩家/落脚点，开门实际穿过；门槛外、门中间与隔墙不算完成 |
 
 游戏里可以直接说：“跟着我”“采集 8 个橡木原木”“看看做一把石镐还缺什么材料”
 “停止动作，但不要下线”。主 AI 负责理解这些目标并选择工具。
@@ -66,6 +68,9 @@ Web profile 把 `desktop` 改为 `web`。上面的命令属于手动安装步骤
 {"tool":"mc_goal","arguments":{"action":"start","kind":"explore","count":4,"radius":12}}
 {"tool":"mc_goal","arguments":{"action":"start","kind":"collect","item":"oak_log","count":8,"deliverTo":"你的玩家名"}}
 {"tool":"mc_combat","arguments":{"entity":"zombie","budgetMs":20000}}
+{"tool":"mc_agent","arguments":{"action":"start","kind":"gather","item":"diamond","count":1,"deliverTo":"你的玩家名"}}
+{"tool":"mc_agent","arguments":{"action":"status"}}
+{"tool":"mc_enter","arguments":{"who":"你的玩家名","budgetMs":60000}}
 ```
 
 ## 行为与边界
@@ -78,7 +83,7 @@ Web profile 把 `desktop` 改为 `web`。上面的命令属于手动安装步骤
 - 用户停止和宿主 AbortSignal 会取消动作；未结算的底层调用会暂时阻止新身体动作，避免旧任务继续抢控制。
 - 食物不足时不会自动狩猎或翻箱；材料不足会返回明确缺口，由主 AI 决定下一步。
 - 合成遵循生存材料和配方规则。mc_goal 可补采缺料、制作必要工具并放置工作台/熔炉；单步 mc_craft 仍要求附近已有所需工作站。
-- 采集限附近已加载资源；不保证跨地图探索或处理任意模组资源。
+- 单步 mc_collect 采集附近资源；完整 mc_agent/mc_goal 采集目标缺资源时会继续移动探索或分步下矿。只使用已加载地形，随移动发现新区域，不能透视未加载区块；不会保证找齐任意模组资源。
 - 熔炼目前使用煤与空普通熔炉；不读取或拿走他人已放入熔炉的物品。任务中断后投入的材料可能仍留在熔炉中。
 - 缺氧上浮先使用跳跃上浮，最多尝试 5 秒；遇到封闭水下空间会返回未恢复提示，不保证自动脱困。
 - 原有 `mc_act` / `mc_build` / `mc_sequence` 继续可用；增加 mc_combat 和 mc_goal 蓝图任务。蓝图支持方块位置和材料，尚不包含完整朝向/方块状态。
@@ -102,7 +107,7 @@ node tools/check-standalone-import.mjs
 
 - 跟随在 2 格附近停下，超过 3.2 格才重新跟进；复用动态路径，减少反复起停。距离可在 mc_survival 配置。
 - 跟随卡住后限制重寻路次数，连续三次无进展则停止冲撞并报告；玩家明显移动后再尝试。
-- mc_goal 在后台运行，任务期间聊天与查询可以继续。一次只运行一个目标，暂停时间也计入预算，最长 10 分钟。
+- mc_agent/mc_goal 在后台运行，任务期间聊天与查询可以继续。一次只运行一个目标；暂停时间也计入预算，最长 30 分钟，深层矿产默认 30 分钟，其余默认 10 分钟。
 - 制作目标会根据当前版本配方处理缺料、工具与工作站；无法取得材料会返回 blocked，不保证完成任意模组科技树。
 - 配方规划在工作线程中运行，避免复杂配方搜索占用机器人控制线程；根据背包、附近木材与维度调整材料选择。
 - 蓝图按高度施工，跳过已完成方块、拒绝重复坐标或占用位置，逐格验证世界状态。规模最多 256 格。
@@ -121,7 +126,7 @@ Hiyori 原始 MIT 许可保留在 `licenses/Hiyori-MIT.txt`，详见 `THIRD_PART
 
 `pnpm add` 日志显示 `Done` 只说明包安装步骤结束，仍需要 DSH 完成插件启用。
 本版修复了 vec3 0.1.7 的命名导出兼容性问题；原 hiyori.2 在这种依赖版本下不能加载。
-如果 Git 安装界面持续停留在安装中，先取消当前安装，再使用 Releases 中的 hiyori.3 ZIP 本地安装方式。
+如果 Git 安装界面持续停留在安装中，先取消当前安装，再使用 Releases 中的最新 ZIP 本地安装方式。
 不要仅把 package.json 中的依赖写进去：profile 的 dsh.profile.bundles 还需要包含 whale_craft，随后重启 DSH。
 ## 聊天、权限与执行反馈优化
 

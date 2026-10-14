@@ -54,6 +54,7 @@ import { waitForEvents } from './src/wait.mjs'
 import { apply as applyHiyoriSkills } from './extensions/hiyori-survival.mjs'
 import { runtimeState } from './src/runtime-state.mjs'
 import { ChatBridge } from './src/chat-bridge.mjs'
+import { createRuntimeHealth } from './src/runtime-health.mjs'
 
 export const name = 'whale_craft'
 export const inject = ['webServer', 'tools']
@@ -62,6 +63,7 @@ export const inject = ['webServer', 'tools']
 const PLUGIN_VERSION = (() => {
   try { return JSON.parse(readFileSync(new URL('./package.json', import.meta.url), 'utf8')).version ?? 'unknown' } catch { return 'unknown' }
 })()
+const getRuntimeHealth = createRuntimeHealth(PLUGIN_VERSION, new URL('.', import.meta.url))
 
 /* ============================ HTTP 工具与信任栅栏 ============================ */
 /* 与 @deepseek-ai/dsh-client-connection 的 /api 同款栅栏（DNS-rebinding + 跨站），
@@ -913,6 +915,7 @@ export function apply(ctx, rawConfig) {
     const ws = hasWorkspace ? wsCfgValues(cwd) : null
     return {
       hasWorkspace,
+      runtime: getRuntimeHealth(),
       workspaceName: hasWorkspace ? workspaceTitleOfCwd(cwd) : null,
       commandWhitelist: pluginConfig.get('commandWhitelist'),
       syncChatToGame: pluginConfig.get('syncChatToGame'),
@@ -1767,6 +1770,7 @@ export function apply(ctx, rawConfig) {
     const s = sess.bot.status()
     const base = {
       online: s.online,
+      runtime: getRuntimeHealth(),
       chatSync: { enabled: pluginConfig.get('syncChatToGame') !== false, ...sess.chatBridge.status() },
       connection: s.connection,        // { host, port, version }
       lastError: s.lastError ?? null,
@@ -2060,7 +2064,7 @@ export function apply(ctx, rawConfig) {
     async execute(args, exec) {
       const lib = libraryInfo()
       return {
-        plugin: { name: 'whale_craft', version: PLUGIN_VERSION, dir: fileURLToPath(new URL('.', import.meta.url)) },
+        plugin: { name: 'whale_craft', version: PLUGIN_VERSION, ...getRuntimeHealth(), dir: fileURLToPath(new URL('.', import.meta.url)) },
         game: {
           testedVersions: lib.testedVersions,
           oldest: lib.oldest,

@@ -60,6 +60,8 @@ interface PlanningContext {
 }
 
 const MAX_EXPANDED_BRANCHES = 4096;
+const WORLD_RESOURCES = new Set(['coal', 'diamond', 'redstone', 'lapis_lazuli', 'raw_iron', 'raw_copper', 'raw_gold',
+  'cobblestone', 'cobbled_deepslate', 'blackstone', 'dirt', 'sand', 'gravel', 'clay_ball']);
 export const SMELT_ITEMS_PER_FUEL = 8;
 export const SMELT_FUEL_ITEM = 'coal';
 
@@ -155,7 +157,16 @@ function ensureStock(
 
   const shortage = requiredStock - have;
   const itemId = context.registry?.itemsByName?.[itemName]?.id;
-  const candidates = itemId === undefined ? [] : recipeCandidates(context, itemId);
+  let candidates = itemId === undefined ? [] : recipeCandidates(context, itemId);
+  if (WORLD_RESOURCES.has(itemName) || /^(?:log2?)$|_ore$/.test(itemName)
+    || /_log$|_stem$/.test(itemName) && !itemName.startsWith('stripped_')) {
+    // Reversible storage recipes cannot establish an initial resource supply.
+    // Keep conversions when all of their inputs are actually already held.
+    candidates = candidates.filter(candidate => {
+      const ingredients = scaledCandidateIngredients(candidate, Math.ceil(shortage / candidate.outputPerCraft), context.nameById);
+      return ingredients && Object.entries(ingredients).every(([name, count]) => availableStock(state.stock, name) >= count);
+    });
+  }
   if (candidates.length === 0) {
     const raw = clonePlanningState(state);
     raw.missing[itemName] = (raw.missing[itemName] ?? 0) + shortage;

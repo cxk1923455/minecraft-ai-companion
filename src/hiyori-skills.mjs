@@ -25,6 +25,22 @@ function canonicalMinecraftMaterial(name) {
 
 // src/hiyori/craftPlanner.ts
 var MAX_EXPANDED_BRANCHES = 4096;
+var WORLD_RESOURCES = /* @__PURE__ */ new Set([
+  "coal",
+  "diamond",
+  "redstone",
+  "lapis_lazuli",
+  "raw_iron",
+  "raw_copper",
+  "raw_gold",
+  "cobblestone",
+  "cobbled_deepslate",
+  "blackstone",
+  "dirt",
+  "sand",
+  "gravel",
+  "clay_ball"
+]);
 var SMELT_ITEMS_PER_FUEL = 8;
 var SMELT_FUEL_ITEM = "coal";
 var KNOWN_SMELT_INPUTS = {
@@ -105,7 +121,13 @@ function ensureStock(itemName, requiredStock, state, path, context) {
   if (path.has(itemName)) return null;
   const shortage = requiredStock - have;
   const itemId = context.registry?.itemsByName?.[itemName]?.id;
-  const candidates = itemId === void 0 ? [] : recipeCandidates(context, itemId);
+  let candidates = itemId === void 0 ? [] : recipeCandidates(context, itemId);
+  if (WORLD_RESOURCES.has(itemName) || /^(?:log2?)$|_ore$/.test(itemName) || /_log$|_stem$/.test(itemName) && !itemName.startsWith("stripped_")) {
+    candidates = candidates.filter((candidate) => {
+      const ingredients = scaledCandidateIngredients(candidate, Math.ceil(shortage / candidate.outputPerCraft), context.nameById);
+      return ingredients && Object.entries(ingredients).every(([name, count]) => availableStock(state.stock, name) >= count);
+    });
+  }
   if (candidates.length === 0) {
     const raw = clonePlanningState(state);
     raw.missing[itemName] = (raw.missing[itemName] ?? 0) + shortage;

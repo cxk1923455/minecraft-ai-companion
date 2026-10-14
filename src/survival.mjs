@@ -10,13 +10,16 @@ import { containerAction } from './containers.mjs'
 import { equipmentAction, equipmentPlan, equipBestBody, interactAction, itemAction, playerAction } from './player-actions.mjs'
 import { farmAction } from './farming.mjs'
 import { tradeAction, stationAction, controlsAction } from './stations.mjs'
+import { AgentController } from './agent-controller.mjs'
+import { attachDoorwayNavigation, doorwayRevision, enterRoom, shouldResumeBlockedFollow } from './doorway-navigation.mjs'
+import { collectTarget } from './target-collection.mjs'
 import { recipesSourceFor, patchedGoto, assessExcavationFluidRisk, runAbortableOperation, smeltInputFor } from './hiyori-skills.mjs'
 
 const { pathfinder, goals } = pathfinderPkg
 const Vec3 = vec3pkg.Vec3 ?? vec3pkg
 const BODY_TOOLS = new Set(['mc_move', 'mc_act', 'mc_give', 'mc_sequence', 'mc_build', 'mc_dig', 'mc_command'])
 const FOOD = ['cooked_beef', 'cooked_porkchop', 'cooked_mutton', 'cooked_chicken', 'cooked_salmon', 'cooked_cod', 'bread', 'baked_potato', 'carrot', 'apple', 'melon_slice', 'sweet_berries']
-const DROP_SOURCES = { cobblestone: ['stone'], cobbled_deepslate: ['deepslate'], raw_iron: ['iron_ore', 'deepslate_iron_ore'], raw_gold: ['gold_ore', 'deepslate_gold_ore'], raw_copper: ['copper_ore', 'deepslate_copper_ore'], coal: ['coal_ore', 'deepslate_coal_ore'], diamond: ['diamond_ore', 'deepslate_diamond_ore'] }
+const DROP_SOURCES = { cobblestone: ['stone'], cobbled_deepslate: ['deepslate'], raw_iron: ['iron_ore', 'deepslate_iron_ore'], raw_gold: ['gold_ore', 'deepslate_gold_ore'], raw_copper: ['copper_ore', 'deepslate_copper_ore'], coal: ['coal_ore', 'deepslate_coal_ore'], diamond: ['diamond_ore', 'deepslate_diamond_ore'], redstone: ['redstone_ore', 'deepslate_redstone_ore'], lapis_lazuli: ['lapis_ore', 'deepslate_lapis_ore'] }
 const HOSTILES = new Set(['zombie', 'zombie_villager', 'husk', 'drowned', 'skeleton', 'stray', 'wither_skeleton', 'spider', 'cave_spider', 'creeper', 'blaze', 'pillager', 'ravager', 'vindicator', 'slime', 'magma_cube'])
 
 export function boundedInteger(value, fallback, min, max, name) {
@@ -59,6 +62,7 @@ export class SurvivalSkills {
     this.activateWrapper = null
     this.lastEquipmentCheck = 0
     this.goals = new TaskGoals(this)
+    this.agent = new AgentController(this)
     this.metrics = { followReplans: 0, interruptions: 0, localDecisions: 0, decisionMsMax: 0 }
     this.decisionSamples = []
     this.lastResult = null
@@ -92,6 +96,7 @@ export class SurvivalSkills {
     if (!b.tool) b.loadPlugin(toolPkg.plugin)
     if (!b.collectBlock) b.loadPlugin(collectPkg.plugin)
     b.pathfinder.setMovements(this.movements(b))
+    this.detachDoorwayNavigation = attachDoorwayNavigation(b)
     this.doorController = new AbortController()
     if (typeof b.activateBlock === 'function') {
       const original = b.activateBlock
@@ -112,6 +117,7 @@ export class SurvivalSkills {
             // Stop upstream's asynchronous useOne retry loop when the server rejects a door.
             b.pathfinder.setGoal(null)
             this.followState.phase = 'blocked'
+            this.followState.blockedDoorwayRevision = doorwayRevision(b)
             this.followState.targetPosition = this.findPlayer(this.follow)?.position?.clone()
           }
           throw e
@@ -156,6 +162,8 @@ export class SurvivalSkills {
   }
   detach(reason) {
     this.halt(reason)
+    this.detachDoorwayNavigation?.()
+    this.detachDoorwayNavigation = null
     this.doorController?.abort(reason)
     if (this.raw?.activateBlock === this.activateWrapper && this.originalActivate) this.raw.activateBlock = this.originalActivate
     this.originalActivate = null; this.activateWrapper = null; this.blockedDoors.clear()
@@ -209,6 +217,7 @@ export class SurvivalSkills {
   trade(args, signal) { return tradeAction(this, args, signal) }
   station(args, signal) { return stationAction(this, args, signal) }
   controls(args, signal) { return controlsAction(this, args, signal) }
+  enter(args, signal) { return enterRoom(this, args, signal) }
   async guarded(promise, signal, ms = 10000, cancel) {
     check(signal)
     const body = this.raw
@@ -360,7 +369,7 @@ export class SurvivalSkills {
         excluded.add(target.position.toString())
         this.host._selfMovingAt = Date.now()
         try {
-          await this.guarded(b.collectBlock.collect(target, { ignoreNoPath: false }), s, 45000)
+          await collectTarget(this, b, target, s, 45000)
           check(s)
           const actual = b.blockAt(target.position)
           if (actual && actual.type !== target.type) broken++
@@ -385,8 +394,13 @@ export class SurvivalSkills {
     // Nearby known resources influence recipe choice; they are never counted as inventory.
     const woodIds = b.registry.blocksArray.filter(block => /_log$|_stem$/.test(block.name) && !block.name.startsWith('stripped_')).map(block => block.id)
     const seenWood = (b.findBlocks({ matching: woodIds, maxDistance: 24, count: 16 }) ?? []).map(p => b.blockAt(p)?.name).filter(Boolean)
-    if (seenWood.length) {
-      for (const name of Object.keys(preferences).filter(name => name.endsWith('_log'))) preferences[name] = seenWood.includes(name) ? 0 : 10
+    for (const entry of b.registry.itemsArray ?? []) {
+      const name = entry.name
+      if (/^stripped_|_wood$|_hyphae$|^(?:stripped_)?bamboo_block$/.test(name)) preferences[name] = 40
+      else if (/_log$|_stem$/.test(name)) {
+        const wrongDimension = b.game?.dimension?.includes('nether') ? name.endsWith('_log') : name.endsWith('_stem')
+        preferences[name] = seenWood.includes(name) ? 0 : wrongDimension ? 30 : seenWood.length ? 10 : preferences[name] ?? 3
+      }
     }
     return planInWorker({ version: b.version, item, count: boundedInteger(args.count, 1, 1, 64, 'count'), resourcePreferences: preferences,
       inventory: b.inventory.items().map(entry => ({ name: entry.name, count: entry.count })) }, { signal })
@@ -608,7 +622,7 @@ export class SurvivalSkills {
     }
     if (state.phase === 'nearby' && playerInReach(b, target, stopDistance + 1.2)) return
     if (state.phase === 'blocked') {
-      if (state.targetPosition && state.targetPosition.distanceTo(target.position) < 2) return
+      if (!shouldResumeBlockedFollow(b, state, target, this.blockedDoors, now)) return
       state.attempts = 0
     }
     if (b.pathfinder.movements) b.pathfinder.movements.allowSprinting = distance > stopDistance + 4
@@ -620,6 +634,7 @@ export class SurvivalSkills {
       this.release(b)
       if (state.attempts >= 3) {
         state.phase = 'blocked'
+        state.blockedDoorwayRevision = doorwayRevision(b)
         this.host.emit('system', { text: 'DeepSeek 跟随受阻：连续重寻路未前进，已停止反复冲撞，等待玩家移动或新的指令。' })
       } else this.restoreFollow()
     }

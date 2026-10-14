@@ -63,7 +63,7 @@ test('each session keeps an independent body and survival settings', () => {
 test('all player and survival extension tools register synchronously with the host schema', () => {
   const registered = new Map(), { host } = fixture()
   applyExtension({ ctx: { tools: { register: tool => registered.set(tool.name, tool) } }, asTool: defineTool, getSession: () => ({ bot: host }) })
-  assert.equal(registered.size, 19)
+  assert.equal(registered.size, 21)
   assert.ok(registered.has('mc_collect'))
   assert.ok(registered.has('mc_halt'))
 })
@@ -391,7 +391,7 @@ test('a stone pickaxe goal from an empty inventory prepares its tools and workbe
   }
   host.placeBlock = async block => { workstations.set(`${block.x},${block.y},${block.z}`, block.name); raw.stock[block.name]-- }
   const gathered = []
-  skills.collect = async (args, signal) => { signal.throwIfAborted(); gathered.push(args.item); raw.stock[args.item] = (raw.stock[args.item] ?? 0) + args.count; return { outcome: 'succeeded', collected: args.count } }
+  skills.collect = async (args, signal) => { signal.throwIfAborted(); assert.ok(!/^stripped_|_wood$|_hyphae$|bamboo_block/.test(args.item), `processed wood is not a naturally gatherable tree: ${args.item}`); gathered.push(args.item); raw.stock[args.item] = (raw.stock[args.item] ?? 0) + args.count; return { outcome: 'succeeded', collected: args.count } }
   skills.goals.start({ kind: 'craft', item: 'stone_pickaxe', count: 1 })
   await skills.goals.job.done
   assert.equal(skills.goals.view().state, 'succeeded', JSON.stringify(skills.goals.view()))
@@ -410,6 +410,35 @@ test('exploration selects safe loaded destinations and returns actual reached po
   assert.equal(skills.goals.view().state, 'succeeded')
   assert.equal(skills.goals.view().result.visited.length, 2)
 })
+test('empty-inventory iron-pickaxe preparation uses real recipes and raw-iron smelting', async () => {
+  const { raw, skills, host } = fixture()
+  const Recipe = mfRequire('prismarine-recipe')(registry).Recipe, stations = new Map(), gathered = []
+  raw.recipesFor = (id, _metadata, _count, table) => Recipe.find(id, null).filter(recipe => (!recipe.requiresTable || table)
+    && recipe.delta.every(delta => delta.count >= 0 || (raw.stock[registry.items[delta.id].name] ?? 0) >= -delta.count))
+  raw.craft = async recipe => { for (const delta of recipe.delta) { const name = registry.items[delta.id].name; raw.stock[name] = (raw.stock[name] ?? 0) + delta.count } }
+  raw.blockAt = p => ({ name: stations.get(p.toString()) ?? (p.y === 63 ? 'stone' : 'air'), position: p, boundingBox: stations.has(p.toString()) || p.y === 63 ? 'block' : 'empty' })
+  raw.findBlock = ({ matching }) => {
+    const found = [...stations].find(([, name]) => registry.blocksByName[name].id === matching)
+    return found ? { name: found[1], position: new Vec3(...found[0].slice(1, -1).split(',').map(Number)) } : null
+  }
+  host.placeBlock = async block => { stations.set(new Vec3(block.x, block.y, block.z).toString(), block.name); raw.stock[block.name]-- }
+  skills.collect = async ({ item, count }) => {
+    assert.ok(/_log$/.test(item) && !item.startsWith('stripped_') || ['cobblestone', 'raw_iron', 'coal'].includes(item), `unexpected natural resource: ${item}`)
+    gathered.push(item); raw.stock[item] = (raw.stock[item] ?? 0) + count
+    return { outcome: 'succeeded', collected: count }
+  }
+  let output = 0
+  raw.openFurnace = async () => ({ inputItem: () => null, fuelItem: () => null, outputItem: () => output ? { name: 'iron_ingot', count: output } : null,
+    putFuel: async (_type, _meta, count) => { raw.stock.coal -= count },
+    putInput: async (_type, _meta, count) => { raw.stock.raw_iron -= count; output = count },
+    takeOutput: async () => { raw.stock.iron_ingot = (raw.stock.iron_ingot ?? 0) + output; output = 0 }, close() {} })
+  skills.goals.start({ kind: 'craft', item: 'iron_pickaxe', count: 1, budgetMs: 15000 })
+  await skills.goals.job.done
+  assert.equal(skills.goals.view().state, 'succeeded', JSON.stringify(skills.goals.view()))
+  assert.equal(raw.stock.iron_pickaxe, 1)
+  assert.ok(gathered.includes('raw_iron') && gathered.includes('coal'))
+  assert.ok([...stations.values()].includes('furnace'))
+})
 
 test('delivery preserves resources when the named player is not visible', async () => {
   const { raw, skills } = fixture()
@@ -418,6 +447,85 @@ test('delivery preserves resources when the named player is not visible', async 
   await skills.goals.job.done
   assert.equal(skills.goals.view().state, 'blocked')
   assert.equal(raw.stock.oak_log, 8)
+})
+test('an inventory-first resource delivery skips mining tools even outside the overworld', async () => {
+  const { raw, skills } = fixture({ diamond: 1 })
+  raw.game.dimension = 'the_nether'
+  raw.players.Player = { entity: { position: new Vec3(1, 64, 0) } }
+  skills.collect = async () => { throw new Error('must not collect an already held resource') }
+  skills.craftPlan = async () => { throw new Error('must not prepare an unnecessary pickaxe') }
+  skills.host.tossItem = async ({ name, count }) => { raw.stock[name] -= count }
+  skills.agent.act({ action: 'start', kind: 'gather', item: 'diamond', count: 1, deliverTo: 'Player' })
+  await skills.goals.job.done
+  assert.equal(skills.goals.view().state, 'succeeded', JSON.stringify(skills.goals.view()))
+  assert.equal(raw.stock.diamond, 0)
+  assert.equal(skills.goals.view().result.delivery.dropped, 1)
+})
+test('resuming a goal waits for a cancelled native action to settle', async () => {
+  const { skills } = fixture()
+  const job = { state: 'running', controller: new AbortController() }
+  skills.quarantine = { label: 'cancelled mining operation' }
+  let settled = false
+  const waiting = skills.goals.ready(job).then(() => { settled = true })
+  await new Promise(resolve => setTimeout(resolve, 60))
+  assert.equal(settled, false)
+  skills.quarantine = null
+  await waiting
+  assert.equal(settled, true)
+})
+test('returning from a distant resource expedition finds the delivery player at the start', async () => {
+  const { raw, skills } = fixture({ diamond: 1 })
+  const origin = raw.entity.position.clone()
+  raw.entity.position = origin.offset(25, -10, 0)
+  let returned = false
+  skills.navigate = async args => {
+    assert.equal(args.budgetMs, 120000)
+    raw.entity.position = new Vec3(args.x, args.y, args.z)
+    raw.players.Player = { entity: { position: origin.offset(1, 0, 0) } }
+    returned = true
+    return { ok: true, confirmed: true }
+  }
+  skills.host.tossItem = async ({ name, count }) => { raw.stock[name] -= count }
+  const job = { kind: 'collect', item: 'diamond', deliverTo: 'Player', origin, controller: new AbortController(), state: 'running', progress: {} }
+  const result = await skills.goals.deliver(job, 1)
+  assert.equal(returned, true); assert.equal(result.dropped, 1)
+})
+test('resource delivery spans stacks and verifies the requested total', async () => {
+  const { raw, skills } = fixture({ diamond: 10 })
+  raw.players.Player = { entity: { position: new Vec3(1, 64, 0) } }
+  const requests = []
+  skills.host.tossItem = async ({ name, count }) => {
+    requests.push(count)
+    raw.stock[name] -= Math.min(count, 5)
+  }
+  skills.agent.act({ action: 'start', kind: 'gather', item: 'diamond', count: 8, deliverTo: 'Player' })
+  await skills.goals.job.done
+  assert.equal(skills.goals.view().state, 'succeeded')
+  assert.deepEqual(requests, [8, 3])
+  assert.equal(raw.stock.diamond, 2)
+  assert.equal(skills.goals.view().result.delivery.dropped, 8)
+})
+test('pausing after a toss side effect does not send the delivered quantity twice', async () => {
+  const { raw, skills } = fixture({ diamond: 2 })
+  raw.players.Player = { entity: { position: new Vec3(1, 64, 0) } }
+  let settle, calls = 0
+  skills.host.tossItem = () => {
+    calls++; raw.stock.diamond--
+    return new Promise(resolve => { settle = resolve })
+  }
+  skills.agent.act({ action: 'start', kind: 'gather', item: 'diamond', count: 1, deliverTo: 'Player' })
+  while (!settle) await tick()
+  skills.goals.suspend()
+  await new Promise(resolve => setTimeout(resolve, 280))
+  assert.equal(skills.goals.view().state, 'paused')
+  assert.ok(skills.quarantine)
+  settle()
+  await tick()
+  skills.goals.resume()
+  await skills.goals.job.done
+  assert.equal(skills.goals.view().state, 'succeeded', JSON.stringify(skills.goals.view()))
+  assert.equal(calls, 1); assert.equal(raw.stock.diamond, 1)
+  assert.equal(skills.goals.view().result.delivery.dropped, 1)
 })
 
 test('delivery reports dropped inventory without falsely claiming player pickup', async () => {
@@ -481,4 +589,21 @@ test('recipe planning avoids consuming extra logs through an unnecessary wood co
   assert.equal(plan.canCraftNow,true)
   assert.equal(plan.totalRequired.oak_log,16)
   assert.equal(plan.steps.some(step=>step.item==='oak_wood'),false)
+})
+test('empty-inventory preparation chooses natural nearby wood instead of stripped or nether variants', async () => {
+  const { raw, skills } = fixture()
+  const tree = new Vec3(8, 64, 0)
+  raw.findBlocks = () => [tree]
+  raw.blockAt = p => ({ name: p.equals(tree) ? 'acacia_log' : 'air', position: p, boundingBox: p.equals(tree) ? 'block' : 'empty' })
+  const plan = await skills.craftPlan({ item: 'wooden_pickaxe', count: 1 })
+  const resources = Object.keys(plan.totalRequired)
+  assert.ok(resources.includes('acacia_log'), JSON.stringify(plan))
+  assert.ok(!resources.some(name => /^stripped_|_wood$|_hyphae$|_stem$|bamboo_block/.test(name)), JSON.stringify(plan))
+})
+test('resource planning retains decompression recipes for storage blocks actually in inventory', () => {
+  const { raw } = fixture({ coal_block: 1 })
+  const plan = planCraft(raw, 'coal', 9)
+  assert.equal(plan.canCraftNow, true, JSON.stringify(plan))
+  assert.equal(plan.totalRequired.coal_block, 1)
+  assert.equal(plan.steps.at(-1).item, 'coal')
 })

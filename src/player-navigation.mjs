@@ -16,6 +16,44 @@ export function doorBase(bot, block) {
     ? bot.blockAt(block.position.offset(0, -1, 0)) ?? block : block
 }
 
+/** A visible player across an open doorway is still in another walk space. */
+export function doorwayBetween(bot, from, to) {
+  if (!bot?.blockAt || !from || !to) return null
+  const delta = to.minus(from), horizontal = Math.hypot(delta.x, delta.z)
+  if (horizontal < 0.05) {
+    for (const height of [0.2, 1.2]) {
+      const block = bot.blockAt(from.offset(0, height, 0).floored())
+      if (isDoor(block) && !/_trapdoor$/.test(block.name)) return doorBase(bot, block)
+    }
+    return null
+  }
+  const checked = new Set(), steps = Math.min(512, Math.ceil(horizontal / 0.15))
+  for (let step = 0; step <= steps; step++) {
+    const point = from.plus(delta.scaled(step / steps))
+    const samples = step === 0 ? [point, point.offset(-0.31, 0, 0), point.offset(0.31, 0, 0), point.offset(0, 0, -0.31), point.offset(0, 0, 0.31)] : [point]
+    for (const sample of samples) for (const height of [0.2, 1.2]) {
+      const block = bot.blockAt(sample.offset(0, height, 0).floored())
+      if (!isDoor(block) || /_trapdoor$/.test(block.name)) continue
+      const base = doorBase(bot, block), key = base.position.toString()
+      if (checked.has(key)) continue
+      checked.add(key)
+      const facing = blockProperties(base).facing
+      const axis = facing === 'east' || facing === 'west' ? 'x' : 'z'
+      const across = axis === 'x' ? 'z' : 'x', plane = base.position[axis] + 0.5
+      if (from[axis] > base.position[axis] - 0.3 && from[axis] < base.position[axis] + 1.3
+        && from[across] > base.position[across] - 0.3 && from[across] < base.position[across] + 1.3
+        && from.y < base.position.y + 2 && from.y + 1.8 > base.position.y) return base
+      const a = from[axis] - plane, b = to[axis] - plane
+      if (a * b > 0 || Math.abs(delta[axis]) < 0.01) continue
+      const t = -a / delta[axis], cross = from[across] + delta[across] * t
+      const feet = from.y + delta.y * t
+      if (t >= 0 && t <= 1 && cross >= base.position[across] && cross <= base.position[across] + 1
+        && feet < base.position.y + 2 && feet + 1.8 > base.position.y) return base
+    }
+  }
+  return null
+}
+
 /** Check collision shapes, rather than accepting a short distance through a wall. */
 export function lineOfSight(bot, from, to, allowedBlock) {
   const delta = to.minus(from), length = delta.norm()
@@ -39,19 +77,24 @@ export function lineOfSight(bot, from, to, allowedBlock) {
 
 export function playerInReach(bot, target, range) {
   return Boolean(target?.position && bot.entity?.position && bot.entity.position.distanceTo(target.position) <= range
+    && !doorwayBetween(bot, bot.entity.position, target.position)
     && lineOfSight(bot, bot.entity.position.offset(0, 1.5, 0), target.position.offset(0, 1.2, 0)))
 }
 
 export class PlayerFollowGoal extends goals.GoalFollow {
   constructor(bot, entity, range) { super(entity, range); this.bot = bot }
   isEnd(node) {
-    return super.isEnd(node) && lineOfSight(this.bot, new Vec3(node.x + 0.5, node.y + 1.5, node.z + 0.5), this.entity.position.offset(0, 1.2, 0))
+    const feet = new Vec3(node.x + 0.5, node.y, node.z + 0.5)
+    return super.isEnd(node) && !doorwayBetween(this.bot, feet, this.entity.position)
+      && lineOfSight(this.bot, feet.offset(0, 1.5, 0), this.entity.position.offset(0, 1.2, 0))
   }
 }
 export class PlayerNearGoal extends goals.GoalNear {
   constructor(bot, point, range) { super(point.x, point.y, point.z, range); this.bot = bot; this.point = point }
   isEnd(node) {
-    return super.isEnd(node) && lineOfSight(this.bot, new Vec3(node.x + 0.5, node.y + 1.5, node.z + 0.5), this.point.offset(0, 1.2, 0))
+    const feet = new Vec3(node.x + 0.5, node.y, node.z + 0.5)
+    return super.isEnd(node) && !doorwayBetween(this.bot, feet, this.point)
+      && lineOfSight(this.bot, feet.offset(0, 1.5, 0), this.point.offset(0, 1.2, 0))
   }
 }
 export class InteractionGoal extends goals.GoalGetToBlock {
@@ -79,8 +122,12 @@ export class PlayerMovements extends Movements {
     this.exclusionAreasStep.push(block => (this.blockedDoors.get(doorBase(bot, block)?.position?.toString()) ?? 0) > Date.now() ? 100 : 0)
   }
   getBlock(pos, dx, dy, dz) {
-    const block = super.getBlock(pos, dx, dy, dz)
-    if (!block?.name || !this.doorAssist || !isDoor(block) || /_trapdoor$/.test(block.name) || !canHandOpen(block) && !blockIsOpen(block)) return block
+    let block = super.getBlock(pos, dx, dy, dz)
+    if (!block?.name || !isDoor(block) || /_trapdoor$/.test(block.name)
+      || !blockIsOpen(block) && (!this.doorAssist || !canHandOpen(block))) return block
+    // Movement search may ignore a door panel, but actual physics and world
+    // observation must retain its collision shapes even when blockAt is cached.
+    block = Object.assign(Object.create(Object.getPrototypeOf(block)), block)
     const properties = blockProperties(block)
     block.physical = false
     block.safe = true

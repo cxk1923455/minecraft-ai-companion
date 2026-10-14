@@ -5,7 +5,8 @@
 这是基于 [Whale Craft](https://github.com/yzi1b/whale-craft) 0.2.0-beta.2 的增强版，集成 Hiyori Minecraft 辅助技能，保留 DSH 原生插件界面和每会话一个机器人。目前通过 DSH 工具接口接入 AI，尚未实现通用 MCP 协议服务。
 
 - 稳定跟随、安全寻路、采集、合成与熔炼。
-- 后台采集、制作、蓝图建造及附近探索目标，可查询、暂停、继续和取消。
+- 持续资源目标：准备工具、探索、分步安全下矿、采集与库存验收，可查询、暂停、继续和取消。
+- 穿门进入房间，校正真实寻路路点，并检查是否与目标处于门的同侧。
 - 自动进食、上浮、PvE 自卫和低血量撤退。
 - Worker 配方规划、动作互斥和本地决策耗时统计。
 
@@ -13,7 +14,7 @@
 
 开发环境需要 Node.js 22 或更新版本。安装开发依赖后运行 `npm run check`；修改 Hiyori TypeScript 源码后运行 `npm run build:hiyori`。
 
-验证：原插件自检、55 项新增测试与独立干净安装检查已通过。真实服务器仍需实测；本地决策耗时不包含模型推理和网络往返，不代表端到端零延迟。
+验证方式与结果见 [AUDIT-REPORT.md](AUDIT-REPORT.md)。真实服务器仍需实测；本地决策耗时不包含模型推理和网络往返，不代表端到端零延迟。
 
 原项目和 Hiyori 的 MIT 许可证及署名保留在 [LICENSE](LICENSE)、[licenses/Hiyori-MIT.txt](licenses/Hiyori-MIT.txt) 和 [THIRD_PARTY_NOTICES.md](THIRD_PARTY_NOTICES.md)。
 
@@ -24,8 +25,8 @@
 # Whale Craft / 鲸鱼工艺
 
 > 本目录是基于用户提供的 `0.2.0-beta.2` 制作的本地 Hiyori 增强版
-> `0.2.0-beta.2.hiyori.5`。包含生存寻路、跟随、采集合成、容器取放、门的通行、游戏聊天同步，以及装备、防御、农务、交易和工作站操作。
-> 具体能力、用法与实测边界见 [玩家能力说明](PLAYER-CAPABILITIES.md)。当前共有 51 个原生工具；增强版没有发布到公共 npm。
+> `0.2.0-beta.2.hiyori.6`。包含持续采矿智能体、生存寻路、跟随、采集合成、容器取放、实际穿门、游戏聊天同步，以及装备、防御、农务、交易和工作站操作。
+> 具体能力、用法与实测边界见 [玩家能力说明](PLAYER-CAPABILITIES.md)。当前共有 53 个原生工具；增强版没有发布到公共 npm。
 > 安装与新增工具说明见 [HIYORI-INTEGRATION.md](HIYORI-INTEGRATION.md)。下文保留原版说明。
 
 **[English ↓](#english)** · 中文 · [![CI](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml/badge.svg)](https://github.com/yzi1b/whale-craft/actions/workflows/ci.yml)
@@ -78,6 +79,8 @@
 >
 > 无论你从何种方式安装本插件，安装完成后，为保证所有功能正常，务必完全重启DSH实例。
 
+Windows 请从“应用 → 退出”完全退出，再重新打开；右上角 X 会隐藏窗口，仍会运行旧插件。MC设置显示运行版本和已安装版本，`mc_status.runtime` 也可核验。
+
 从 [增强版发布页](https://github.com/cxk1923455/minecraft-ai-companion/releases) 下载当前版本，或从本仓库安装。公共 npm 上的 `whale_craft` 仍是原版。
 
 ### DSH 插件管理
@@ -102,7 +105,7 @@ dsh plugin --profile web add github:cxk1923455/minecraft-ai-companion
 从下载的增强版 `.tgz` 安装（按实际下载路径修改）：
 
 ```bash
-dsh plugin --profile desktop add 'file:C:/Downloads/whale_craft-0.2.0-beta.2.hiyori.5.tgz'
+dsh plugin --profile desktop add 'file:C:/Downloads/whale_craft-0.2.0-beta.2.hiyori.6.tgz'
 ```
 
 别忘了重启DSH。

@@ -16,7 +16,16 @@ export function apply({ ctx, asTool, getSession, logLine }) {
   register('mc_follow', '持续跟随指定玩家，直到 mc_halt、下线或死亡。执行其他动作时暂时挂起，结束后恢复；玩家暂时不可见时等待。', {
     who: { type: 'string', required: true },
   }, (skills, args) => skills.setFollow(args.who), 10000)
-  register('mc_collect', '生存采集：选工具、寻路、挖掘并拾取，以背包增加量验收。item 是目标物品，block 可指定资源方块；默认附近搜索，不自动漫游。', {
+  register('mc_enter', '真正进入玩家所在房间：识别门、门内目标和通行侧，开门并走过门槛，以实际站位确认。给 who 玩家名，或给房间内部 x/y/z 坐标。不能在门外仅因距离近就报已进屋；不传送、不拆墙。', {
+    who: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, budgetMs: { type: 'integer' },
+  }, (skills, args, signal) => skills.enter(args, signal), 125000)
+  register('mc_agent', '持续执行玩家目标的智能体入口。start 启动后台 gather 找资源、craft 制作、enter 进入房间、explore 探索、build 蓝图、follow 跟随；status 查询实际阶段和进度，pause/resume/cancel 管理目标。gather 会检查背包、准备正确工具，附近没有资源就实际探索/安全下矿、遇阻换路线，直到验收或具体安全/时间边界；不会一次扫描无矿就结束。钻石可能需正常采矿时间，默认最多30分钟。deliverTo 可指定交接玩家；相同目标复用而不重复启动。', {
+    action: { type: 'string', enum: ['start', 'status', 'pause', 'resume', 'cancel'], required: true },
+    kind: { type: 'string', enum: ['gather', 'craft', 'enter', 'explore', 'build', 'follow'] },
+    item: { type: 'string' }, count: { type: 'integer' }, who: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, radius: { type: 'integer' }, budgetMs: { type: 'integer' }, deliverTo: { type: 'string' }, useExisting: { type: 'boolean' },
+    blocks: { type: 'array', items: { type: 'object', additionalProperties: true } },
+  }, (skills, args) => skills.agent.act(args), 10000)
+  register('mc_collect', '单次附近生存采集：选工具、寻路、挖掘并拾取，以背包增加量验收。完整“去找/挖钻石”等持续目标必须用 mc_agent gather；不能只反复调用本工具扫描附近后宣称无法完成。item 是目标物品，block 可指定资源方块。', {
     item: { type: 'string', required: true }, block: { type: 'string' }, count: { type: 'integer' }, radius: { type: 'integer' }, budgetMs: { type: 'integer' },
   }, (skills, args, signal) => skills.collect(args, signal))
   register('mc_craft', '生存合成：根据当前版本配方拆出中间材料、缺料和工作台需求。planOnly=true 只规划；缺料则返回 blocked。执行结果经服务器背包确认，不使用创造给物品。', {
@@ -58,9 +67,9 @@ export function apply({ ctx, asTool, getSession, logLine }) {
   register('mc_controls', '短时真实玩家按键，适合蹲行、跳跃、游泳与脱困。按键为 forward/back/left/right/jump/sprint/sneak，durationMs 50–5000；到时或取消会释放全部按键，返回实际位移。常规赶路优先 mc_pathfind，持续跟随用 mc_follow。', {
     forward: { type: 'boolean' }, back: { type: 'boolean' }, left: { type: 'boolean' }, right: { type: 'boolean' }, jump: { type: 'boolean' }, sprint: { type: 'boolean' }, sneak: { type: 'boolean' }, durationMs: { type: 'integer' },
   }, (skills, args, signal) => skills.controls(args, signal), 10000)
-  register('mc_goal', '后台连续执行目标，不阻塞当前对话：craft 自动补采材料、工具和工作站；collect 采集；build 蓝图备料并建造；explore 探索附近已加载安全地形。action 为 start/status/pause/resume/cancel。采集或制作可用 deliverTo 指定交接玩家。危险可能暂停目标，无法取得资源时返回 blocked。', {
+  register('mc_goal', '后台连续执行目标，不阻塞当前对话：craft 自动补采材料、工具和工作站；collect 持续寻找资源并安全探索/下矿；enter 进入房间；build 蓝图备料并建造；explore 探索附近地形。action 为 start/status/pause/resume/cancel。采集或制作可用 deliverTo 指定交接玩家。优先用 mc_agent 规划完整目标；危险可能暂停，只有具体资源/安全/预算边界才结算未完成。', {
     action: { type: 'string', enum: ['start', 'status', 'pause', 'resume', 'cancel'], required: true },
-    kind: { type: 'string', enum: ['craft', 'collect', 'build', 'explore'] }, item: { type: 'string' }, count: { type: 'integer' }, radius: { type: 'integer' }, budgetMs: { type: 'integer' }, deliverTo: { type: 'string' },
+    kind: { type: 'string', enum: ['craft', 'collect', 'build', 'explore', 'enter'] }, item: { type: 'string' }, count: { type: 'integer' }, radius: { type: 'integer' }, budgetMs: { type: 'integer' }, deliverTo: { type: 'string' }, who: { type: 'string' }, x: { type: 'number' }, y: { type: 'number' }, z: { type: 'number' }, useExisting: { type: 'boolean' },
     blocks: { type: 'array', items: { type: 'object', additionalProperties: true }, description: 'build 蓝图：每项 x/y/z 整数和 name 材料，最多256格' },
   }, (skills, args) => {
     if (args.action === 'start') return skills.goals.start(args)

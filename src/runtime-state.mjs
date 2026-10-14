@@ -9,6 +9,6 @@ export function runtimeState(host, { commandsEnabled = false } = {}) {
     .sort((a,b)=>a.distance-b.distance).slice(0,4)
   return { observedAt:Date.now(), online:true, position:state.position, players, follow:state.follow,
     active:state.active, lastAction:state.lastResult,
-    goal:state.goal ? {kind:state.goal.kind,state:state.goal.state} : null,
+    goal:state.goal ? {id:state.goal.id,kind:state.goal.kind,item:state.goal.item,state:state.goal.state,phase:state.goal.phase,progress:state.goal.progress,deadline:state.goal.deadline,error:state.goal.error} : null,
     commandsEnabled:commandsEnabled === true }
 }
